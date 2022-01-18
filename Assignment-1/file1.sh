@@ -1,0 +1,1 @@
+factor $1 | cut -c 5-
