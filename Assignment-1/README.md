@@ -14,3 +14,13 @@ unzip 1.b.files.zip
 ```
 unzip data1d.zip -d data1d/
 ```
+
+- 1.f
+```
+unzip 1c_input.txt.zip
+mv 1d_input.txt 1f_input.txt
+```
+
+```
+bash file6.sh 1f_input.txt
+```

@@ -18,5 +18,5 @@ done
 #----------------------
 
 cat 1.b.files.out/*.txt >> temp;
-sort -n temp | uniq -c | awk ' { t = $1; $1 = $2; $2 = t; print; } ' > 1.b.out.txt
+sort -n temp | uniq -c | awk '{print $2,$1}' > 1.b.out.txt
 rm temp
