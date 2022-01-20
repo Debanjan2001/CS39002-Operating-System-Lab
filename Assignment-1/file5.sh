@@ -12,7 +12,7 @@ while getopts ":v" OPT;do
 done
 
 log "Setting env variable REQ_HEADERS..."
-export REQ_HEADERS="Accept,User-Agent"
+export REQ_HEADERS="Accept,Connection"
 
 log "GET-ting example.com to example.html..."
 curl -s --get https://example.com --output example.html
@@ -28,9 +28,7 @@ echo $FETCHED_HEADERS
 log "Checking for REQ_HEADERS..."
 for HEADER in ${REQ_HEADERS//,/ };do
     VALUE=$(echo $FETCHED_HEADERS | jq ".[\"${HEADER}\"]")
-    # echo $VALUE
-    if [ VALUE != 'null' ]
-    then
+    if [ $VALUE != 'null' ];then
         echo "${HEADER}:$VALUE"
     else 
         echo "${HEADER}: not found"
@@ -41,9 +39,8 @@ log "Checking validity of JSON files..."
 echo -n > ./1.e.files/valid.txt 
 echo -n > ./1.e.files/invalid.txt
 for FILE in 1.e.files/*.json;do
-    log "\t >>Validating $(basename $FILE)..."
-    IS_VALID=$(curl -s -d "json=`cat $FILE`" -X POST http://validate.jsontest.com/ | jq ".[\"validate\"]")
-    if [ $IS_VALID = "true" ];then
+    log ">>Validating $(basename $FILE)..."
+    if [ $(curl -s -d "json=`cat $FILE`" -X POST http://validate.jsontest.com/ | jq ".[\"validate\"]") = "true" ];then
         echo $(basename $FILE) >> ./1.e.files/valid.txt
     else 
         echo $(basename $FILE) >> ./1.e.files/invalid.txt
