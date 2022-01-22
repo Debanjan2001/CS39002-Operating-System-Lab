@@ -1,4 +1,4 @@
-function log () {
+log () {
     if [ $VERBOSE -eq 1 ];then  
         echo "$@"
     fi

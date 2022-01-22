@@ -1,5 +1,4 @@
-FILENAME=$1
-read -p '>> Enter Column Number: ' COLNUM
+FILENAME=$1;COLNUM=$2
 awk -v col=$COLNUM '{print tolower($col)}' $1 | 
 sort | 
 uniq -c | 

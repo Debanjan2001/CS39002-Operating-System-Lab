@@ -1,4 +1,4 @@
-read -p '>> Enter Name of file: ' FILENAME
+FILENAME=$1;COLNUM=$2;REGEXP=$3
 > $FILENAME
 for ((i=1;i<=150;i++));do
     row=()
@@ -8,14 +8,8 @@ for ((i=1;i<=150;i++));do
     row+=$RANDOM
     echo $row >> $FILENAME
 done
-read -p '>> Enter Column Number(1-10): ' COLNUM
-read -p '>> Enter Regular Expression: ' REGEXP
-if  [[ $(cut -d"," -f$COLNUM $FILENAME | grep $REGEXP) ]];then
-    echo "YES"
+if [[ $(awk -F"," -v col=$COLNUM '{print $col}' $FILENAME | grep $REGEXP) ]];then
+    echo "YES" 
 else
     echo "NO"
 fi
-
-
-
-
