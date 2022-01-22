@@ -1,6 +1,6 @@
 mkdir -p 1.c.out
 
-EXTENSIONS=$(find data1c -type f | perl -ne 'print $1 if m/\.([^.\/]+)$/' | sort -u)
+EXTENSIONS=$(find data1c/ -type f | grep -o '\.[^./]*$' | sort -u | cut -c2-)
 
 for EXT in $EXTENSIONS; do
     mkdir -p "1.c.out/$EXT"
