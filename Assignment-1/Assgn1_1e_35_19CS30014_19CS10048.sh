@@ -26,11 +26,7 @@ FETCHED_HEADERS=`curl -s --get http://headers.jsontest.com/`
 log "Checking for REQ_HEADERS..."
 for HEADER in ${REQ_HEADERS//,/ };do
     VALUE=$(echo $FETCHED_HEADERS | jq ".[\"${HEADER}\"]")
-    if [ $VALUE != 'null' ];then
-        echo "${HEADER}:$VALUE"
-    else 
-        echo "${HEADER}: not found"
-    fi
+    echo "${HEADER}:$VALUE"
 done
 
 log "Checking validity of JSON..."
