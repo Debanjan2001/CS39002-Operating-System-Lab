@@ -1,4 +1,4 @@
-log () {
+log (){
     if [ $VERBOSE -eq 1 ];then  
         echo "$@"
     fi
@@ -30,8 +30,8 @@ for HEADER in ${REQ_HEADERS//,/ };do
 done
 
 log "Checking JSONs..."
-echo -n > valid.txt 
-echo -n > invalid.txt
+> valid.txt 
+> invalid.txt
 for FILE in 1.e.files/*.json;do
     log ">>Validating $FILE..."
     if [ $(curl -s -d "json=`cat $FILE`" -X POST http://validate.jsontest.com/ | jq ".[\"validate\"]") = "true" ];then
