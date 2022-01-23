@@ -43,8 +43,7 @@ for FILE in 1.e.files/*.json;do
     else 
         echo $(basename $FILE) >> invalid.txt
     fi
+done
 
 sort valid.txt -o valid.txt
 sort invalid.txt -o invalid.txt
-
-done
