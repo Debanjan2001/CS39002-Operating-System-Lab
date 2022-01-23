@@ -34,6 +34,9 @@ Q5:
     >> Run:
         $ bash Assgn1_1e_35_19CS30014_19CS10048.sh
         (assuming '1.e.files' is present in the current directory of the shell terminal.)
+
+        $ bash Assgn1_1e_35_19CS30014_19CS10048.sh -v
+        (run in verbose mode)
     
     >> Output: the ip, the response headers and the required headers are printed on the console itself.
                'example.html', 'valid.txt' and 'invalid.txt' are formed in the current directory of the shell terminal itself.
