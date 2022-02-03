@@ -1,3 +1,11 @@
+/*
+ * Authors - Debanjan Saha + Pritkumar Godhani
+ * Roll - 19CS30014 + 19CS10048
+ * Description - Implementing our own shell
+ * Operating System Lab
+ * © DS&PG 2021 IIT KGP
+*/
+
 #include <bits/stdc++.h>
 using namespace std;
 
