@@ -9,30 +9,27 @@
 #include <bits/stdc++.h>
 using namespace std;
 
-#include<iostream>
-#include<vector>
-#include<termios.h>
-#include<sys/wait.h>
-#include<fcntl.h>
-#include<unistd.h>
-#include<string.h>
+#include <termios.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#include <cstring>
+#include <cstdlib>
+#include <stdio.h>
+#include <setjmp.h>
+#include <errno.h>
 
 struct termios original;
 
 #define BACKSPACE 127
+#define MAXHISTSIZE 1000
 
-void disableRawMode() {
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
-}
-
-void enableRawMode() {
-	tcgetattr(STDIN_FILENO, &original);
-	// atexit(disableRawMode);
-	struct termios raw = original;
-	raw.c_lflag &= ~(ECHO | ICANON);
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-}
-
+vector<pid_t> waitingFor;
+static sigjmp_buf backtoprompt;
+static volatile sig_atomic_t jumpaction = 0;
+pid_t parent;
 
 const string WHITESPACE = " \n\r\t\f\v";
 string ltrim(const string &s) {
@@ -47,6 +44,20 @@ string trim(const string &s) {
     return rtrim(ltrim(s));
 }
 
+void disableRawMode() {
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+}
+
+void enableRawMode() {
+	tcgetattr(STDIN_FILENO, &original);
+	// atexit(disableRawMode);
+	struct termios raw = original;
+	raw.c_lflag &= ~(ECHO | ICANON | IEXTEN);
+    // raw.c_cc[VSUSP] = _POSIX_VDISABLE;
+    raw.c_cc[VREPRINT] = _POSIX_VDISABLE;
+	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
 class Command {
 public:
     string enteredCmd;
@@ -55,13 +66,11 @@ public:
     bool isComposite;
     int inFile;
     int outFile;
+    string infilename;
+    string outfilename;
     vector<Command*> pipeCmds;
     vector<Command*> bgCmds;
     vector<char*> tokens;
-    /*Command(string _enteredCmd) {
-        enteredCmd = string(_enteredCmd);
-        bool readSuccess = parseCommand(_enteredCmd);
-    }*/
     Command(string _enteredCmd) {
         enteredCmd = string(_enteredCmd);
         isComposite = false;
@@ -69,21 +78,19 @@ public:
         isPipe = false;
         inFile = STDIN_FILENO;
         outFile = STDOUT_FILENO;
+        infilename = "";
+        outfilename = "";
     }
 };
 
 void readLine(string& line) {
-	/*
-	 * clear any buffer present in line from earlier operations
-	 */
+	// clear any buffer present in line from earlier operations
 	line.clear();
 	char ch;
 	while (true) {
 		ch = getchar();
 		if (ch == BACKSPACE) {
-			/*
-			 * Backspace
-			 */
+			// Backspace
 			if (line.empty()) {
 				continue;
 			}
@@ -92,28 +99,22 @@ void readLine(string& line) {
 				line.pop_back();
 			}
 		} else if (ch == '\t') {
-			/*
-			 * Autocomplete
-			 */
+			// Autocomplete
 		}
 		else  if (ch == '\n') {
-			/*
-			 * Newline
-			 */
+			// Newline
 			cout << "\n";
 			return;
 		} else {
-			/*
-			 * Anything else
-			 */
+			// Anything else
 			line += ch;
 			cout << ch;
 		}
 	}
 }
 
-void tokenizeCommand(string& command, vector<char *>& tokenized){
-	cout<<"Received : "<<command<<endl;
+int tokenizeCommand(string& command, Command* cmd){
+	// cout<<"Received : "<<command<<endl;
 	int len = command.length();
 	string token = "";
 
@@ -121,10 +122,8 @@ void tokenizeCommand(string& command, vector<char *>& tokenized){
 	bool foundQuote=false;
 	char activeQuote = '\0';
 	char singleQuote='\'', doubleQuote='\"';
-
-	/*
-	 * 2 pointer algorithm to tokenize a command
-	 */
+    vector<string> args;
+	// 2 pointer algorithm to tokenize a command
 	while(tail < len){
 		while(head + 1<len && (foundQuote || command[head+1] != ' ')){
 			head += 1;
@@ -141,9 +140,10 @@ void tokenizeCommand(string& command, vector<char *>& tokenized){
 		}
 
 		if(head >= tail){
-			char *token_c_str = new char[token.length()+1];
-			strcpy(token_c_str, const_cast<char *>(token.c_str()));
-			tokenized.push_back(token_c_str);
+            args.push_back(token);
+			// char *token_c_str = new char[token.length()+1];
+			// strcpy(token_c_str, const_cast<char *>(token.c_str()));
+			// cmd->tokens.push_back(token_c_str);
 			// cout<<const_cast<const char *>(str)<<endl;
 			token.clear();
 			tail = head + 1;
@@ -156,11 +156,49 @@ void tokenizeCommand(string& command, vector<char *>& tokenized){
 
 	if(foundQuote != false){
 		cout<<"ParseError(): Invalid Command\n";
-		tokenized.clear();
+		cmd->tokens.clear();
 		exit(EXIT_FAILURE);
 	}
 
-	tokenized.push_back(NULL);
+    vector<string> args_cmd;
+    for(int i = 0; i < args.size(); i++) {
+        if(args[i] == ">")
+        {
+            // cout<<"o redirect"<<endl;
+            if(i == args.size()-1) {
+                cerr<<"ERROR:: argument absent for i/o redirection token."<<endl;
+                return -1;
+            }
+            cmd->outfilename = args[i+1];
+            i++;
+        }
+        else if(args[i] == "<")
+        {
+            // cout<<"i redirect"<<endl;
+            if(i == args.size()-1) {
+                cerr<<"ERROR:: argument absent for i/o redirection token."<<endl;
+                return -1;
+            }
+            cmd->infilename = args[i+1];
+            i++;
+        }  
+        else {
+            // char *token_c_str = new char[args[i].length()+1];
+			// strcpy(token_c_str, const_cast<char *>(args[i].c_str()));
+			// cmd->tokens.push_back(token_c_str);
+            args_cmd.push_back(args[i]);
+        } 
+    }
+
+    for(string s : args_cmd) {
+        char* token_c_str = new char[s.length()+1];
+        strcpy(token_c_str, const_cast<char *>(s.c_str()));
+        cmd->tokens.push_back(token_c_str);
+        // cout<<"after io redirection : "<<s<<endl;
+    }
+
+	cmd->tokens.push_back(NULL);
+    return 0;
 }
 
 int splitPipe(string& line, vector<string>& commandList) {
@@ -185,9 +223,7 @@ int splitPipe(string& line, vector<string>& commandList) {
 		}
 
 		if(i == len-1){
-			/*
-			 * Reached end of String
-			 */
+			// Reached end of string
 			if(!command.empty()){
 				while(!command.empty() && command.back() == ' '){
 					command.pop_back();
@@ -260,12 +296,9 @@ int parseCommand(string enteredcmd, Command* cmd, int pipeNum = -1) {
     }
     else {
         cmd->isPipe = false;
-        tokenizeCommand(cmd->enteredCmd, cmd->tokens);
-        // stringstream ss(enteredcmd);
-        // string nexttoken;
-        // while(getline(ss, nexttoken, ' ')) {
-        //     cmd->tokens.push_back(nexttoken);
-        // }
+        if( tokenizeCommand(cmd->enteredCmd, cmd) < 0) {
+            return -1;
+        }
     }    
     return 0;
     /*vector<string> bgcomm;
@@ -297,14 +330,34 @@ int parseCommand(string enteredcmd, Command* cmd, int pipeNum = -1) {
     }*/
 }
 
+void sigintHandler(int signo) {
+    // if(waitingFor.size() > 1) {
+    //     pid_t pid = waitingFor[waitingFor.size()-1];
+    //     if(kill(pid, SIGINT) < 0) {
+    //         cerr<<"ERROR:: kill() to pid["<<pid<<"] failed [SIGINT]"<<endl;
+    //     }
+    //     waitingFor.pop_back();
+    // }
+    if(!jumpaction) return;
+    siglongjmp(backtoprompt, 42);
+}
+
+void sigtstpHandler(int signo) {
+    // signal(SIGINT, SIG_IGN);
+    // signal(SIGTSTP, SIG_IGN);
+    // kill(getpid(),SIGTSTP);
+    pause();
+}
+
 int executeSimpleCommand(Command* cmd, int inFD, int outFD) {
-    // cout<<"Simple CMD : "<<cmd->enteredCmd<<endl;
+    cout<<"Simple CMD : "<<cmd->enteredCmd<<endl;
     pid_t pid;
     if(cmd->isBackground) {
         // Push to background, spawn a new process
         // cout<<"background"<<endl;
-
         if((pid = fork()) == 0) {
+            signal(SIGINT, SIG_IGN);
+            signal(SIGTSTP, SIG_IGN);
             if(inFD != STDIN_FILENO) {
                 dup2(inFD, STDIN_FILENO);
                 close(inFD);
@@ -327,6 +380,12 @@ int executeSimpleCommand(Command* cmd, int inFD, int outFD) {
         // Normal process executions
         // cout<<"normal single command"<<endl;
         if((pid = fork()) == 0) {
+            // pid_t child = getpid();
+            setpgid(getpid(), getpid());
+            // tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTSTP, SIG_DFL);
+            signal(SIGTTIN, SIG_IGN);
             if(inFD != STDIN_FILENO) {
                 dup2(inFD, STDIN_FILENO);
                 close(inFD);
@@ -342,7 +401,22 @@ int executeSimpleCommand(Command* cmd, int inFD, int outFD) {
             exit(status);
         }
         else {
-            wait(NULL);
+            waitingFor.push_back(pid);
+            setpgid(pid, pid);
+            // wait(NULL);
+            int status;
+            pid_t x = waitpid(pid, &status, WUNTRACED);
+            cout<<"Wait status : "<<status<<endl;
+            // cout<<"Waiting stopped.."<<endl;
+            if(!WIFEXITED(status) && WIFSTOPPED(status)) {
+                cout<<"stopped by : "<<WSTOPSIG(status)<<endl;
+                cout<<"Resuming child["<<pid<<"] now..."<<x<<endl;
+                try  {
+                    kill(pid, SIGCONT);
+                } catch (...) {
+                    cerr<<"ERROR:: signal transmission SIGCONT failed. "<<endl;
+                }
+            }
             return 0;
         }
     }
@@ -351,30 +425,15 @@ int executeSimpleCommand(Command* cmd, int inFD, int outFD) {
 
 int executeCommand(Command* cmd) {
     int numArgs = cmd->tokens.size()-1;
-    for(int i = 0; i < cmd->tokens.size(); i++) {
-        if(cmd->tokens[i] == ">")
-        {
-            if(i == cmd->tokens.size()-1) {
-                cerr<<"ERROR:: argument absent for i/o redirection token."<<endl;
-                return -1;
-            }
-            if((cmd->outFile = open(cmd->tokens[i+1], O_WRONLY | O_CREAT, 0666)) < 0) {
-                cerr<<"WARNING:: i/o redirection failed... switching to stdi/o."<<endl;
-                cmd->outFile = STDOUT_FILENO;
-            }
-        }
 
-        if(cmd->tokens[i] == "<")
-        {
-            if(i == cmd->tokens.size()-1) {
-                cerr<<"ERROR:: argument absent for i/o redirection token."<<endl;
-                return -1;
-            }
-            if((cmd->inFile = open(cmd->tokens[i+1], O_RDONLY)) < 0) {
-                cerr<<"WARNING:: i/o redirection failed... switching to stdi/o."<<endl;
-                cmd->inFile = STDIN_FILENO;
-            }
-        }   
+    if(cmd->infilename.length() > 0 && ((cmd->inFile = open(cmd->infilename.c_str(), O_RDONLY)) < 0)) {
+        cerr<<"WARNING:: i/o redirection file cannot be accessed... using stdi/o."<<endl;
+        cmd->inFile = STDIN_FILENO;
+    }
+
+    if(cmd->outfilename.length() > 0 && ((cmd->outFile = open(cmd->outfilename.c_str(), O_WRONLY|O_CREAT, 0666)) < 0)){
+        cerr<<"WARNING:: i/o redirection file cannot be accessed... using stdi/o."<<endl;
+        cmd->outFile = STDIN_FILENO;
     }
 
     if(cmd->isPipe) {
@@ -390,7 +449,7 @@ int executeCommand(Command* cmd) {
                 cerr<<"ERROR:: pipe() failed."<<endl;
                 pipeErr = 1;
             } else {
-                status = executeSimpleCommand(cmd->pipeCmds[i], inFD, pipeFD[1]) && status;
+                status = executeSimpleCommand(cmd->pipeCmds[i], inFD, pipeFD[1]);
                 close(pipeFD[1]);
                 inFD = pipeFD[0];
             }
@@ -398,7 +457,7 @@ int executeCommand(Command* cmd) {
         // put not error later
         if(!pipeErr) {
             //cout<<"And finish."<<endl;
-            status = executeSimpleCommand(cmd->pipeCmds[i], inFD, cmd->pipeCmds[i]->outFile) && status;
+            status = executeSimpleCommand(cmd->pipeCmds[i], inFD, cmd->pipeCmds[i]->outFile);
         }
         return status;
     } 
@@ -406,6 +465,34 @@ int executeCommand(Command* cmd) {
         return executeSimpleCommand(cmd, cmd->inFile, cmd->outFile);
     }
 
+}
+
+int fetchHistory(deque<string>& history) {
+    string history_file = "./mybash_history";
+    ifstream file_in(history_file);
+    string line;
+    while(file_in) {
+        getline(file_in, line);
+        if(trim(line).length() > 0)
+            history.push_back(trim(line));
+    }
+    file_in.close();
+    return 0;
+}
+
+int saveHistory(deque<string>& history) {
+    string history_file = "./mybash_history";
+    ofstream file_out(history_file);
+    for(string x : history) {
+        if(x.length() > 0)
+            file_out<<x<<endl;   
+    }
+    file_out.close();
+    return 0;
+}
+
+string searchHistory(deque<string>& history) {
+    return string("");
 }
 
 void testParser() {
@@ -424,18 +511,47 @@ int main () {
 
     enableRawMode();
 
+    // waitingFor.push_back(-1);
+
     string enteredcmd;
-    vector<Command*> history;
+    deque<string> history;
+
+    fetchHistory(history);
+    parent = getpid();
+    signal(SIGINT, sigintHandler);
+    signal(SIGTSTP, SIG_IGN);
+    setpgid(parent, parent);
+    tcsetpgrp(STDIN_FILENO, parent);
     // testParser();
     int i = 0;
     // vector<string> cmdi = {"ls &", "wc|sed &", "ls | wc", "ls"};
     while(1) {
+        signal(SIGTSTP, SIG_IGN);
         cout<<">>> ";
         readLine(enteredcmd);
         if (enteredcmd.empty()) {
-			cout << "You have not entered anything!\n";
+			// cout << "You have not entered anything!\n";
 			continue;
 		}
+        
+        if(history.empty() || (!history.empty() && enteredcmd.compare(history[history.size()-1]) != 0)) {
+            if(history.size() >= MAXHISTSIZE) {
+                history.pop_front();
+            }
+            history.push_back(enteredcmd);
+        }
+        if (enteredcmd.compare("exit") == 0) {
+			cout << "Exiting...\n";
+			break;
+		}
+        if (enteredcmd.compare("history") == 0) {
+            cout << "Showing history..." << endl;
+            for(string x: history) {
+                cout<<x<<endl;
+            }
+            continue;
+        }
+
         // autocomplete for files
 
         // check for ctrl c, ctrl z, ctrl r
@@ -453,13 +569,14 @@ int main () {
             continue;
         }
 
-        if (enteredcmd.compare("exit") == 0) {
-			cout << "Exiting...\n";
-			break;
-		}
-        i++;
-        history.push_back(cmd);
+        if(sigsetjmp(backtoprompt, 1) == 42) {
+            cout<<"^C"<<endl;
+        }
+        jumpaction = 1;
+        
     }
+
+    saveHistory(history);
 
 	disableRawMode();
 
