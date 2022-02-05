@@ -454,6 +454,18 @@ int searchHistory(deque<string>& history, string& searchstr) {
 
 int handleMultiwatch(string entered_cmd) {
     // start
+    // Parse commands into a vector<Command*>
+    // Open as many file descriptors as there are commands
+    // Fork the commands
+    // Give the write access to the commands
+    // Collect all the read descriptors in a separate FD_set
+    // Select from FD_set
+    // Use some identification for which process was selected
+    // keep printing until all child do not stop
+    // do the pgid voodoo here to stop on ctrl c
+    // end
+
+    // doubt : how will these process take inputs ? or do we assume them to work without inputs
     return 0;
 }
 
