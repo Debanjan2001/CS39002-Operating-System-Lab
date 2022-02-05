@@ -30,6 +30,10 @@ vector<pid_t> waitingFor;
 static sigjmp_buf backtoprompt;
 static volatile sig_atomic_t jumpaction = 0;
 pid_t parent;
+pid_t shell_pgid;
+struct termios shell_tmodes;
+int shell_terminal;
+deque<string> history;
 
 const string WHITESPACE = " \n\r\t\f\v";
 string ltrim(const string &s) {
@@ -101,6 +105,10 @@ void readLine(string& line) {
 		} else if (ch == '\t') {
 			// Autocomplete
 		}
+        else if (iscntrl(ch) && ch == 18) {
+            // CTRL R pressed
+            // wait for autocomplete
+        }
 		else  if (ch == '\n') {
 			// Newline
 			cout << "\n";
@@ -141,10 +149,6 @@ int tokenizeCommand(string& command, Command* cmd){
 
 		if(head >= tail){
             args.push_back(token);
-			// char *token_c_str = new char[token.length()+1];
-			// strcpy(token_c_str, const_cast<char *>(token.c_str()));
-			// cmd->tokens.push_back(token_c_str);
-			// cout<<const_cast<const char *>(str)<<endl;
 			token.clear();
 			tail = head + 1;
 			head = tail - 1;
@@ -183,9 +187,6 @@ int tokenizeCommand(string& command, Command* cmd){
             i++;
         }  
         else {
-            // char *token_c_str = new char[args[i].length()+1];
-			// strcpy(token_c_str, const_cast<char *>(args[i].c_str()));
-			// cmd->tokens.push_back(token_c_str);
             args_cmd.push_back(args[i]);
         } 
     }
@@ -202,7 +203,6 @@ int tokenizeCommand(string& command, Command* cmd){
 }
 
 int splitPipe(string& line, vector<string>& commandList) {
-
 	string command = "";
 	int numPipes = 0;
 
@@ -255,23 +255,6 @@ int splitAmpersand(string str, vector<string>& command, string del = "&") {
     return count;
 }
 
-/*int splitPipe(string str, vector<string>& command, string del = "|") {
-    int count = 0;
-    size_t pos = 0;
-    string token;
-    while ((pos = str.find(del)) != string::npos) {
-        count ++;
-        token = str.substr(0, pos);
-        command.push_back(trim(token));
-        str.erase(0, pos + del.length());
-    }
-    if(trim(str).length() > 0) {
-        count++;
-        command.push_back(trim(str));
-    }
-    return count;
-}*/
-
 int parseCommand(string enteredcmd, Command* cmd, int pipeNum = -1) {
     // parse command and extract all the information
     trim(enteredcmd);
@@ -301,125 +284,73 @@ int parseCommand(string enteredcmd, Command* cmd, int pipeNum = -1) {
         }
     }    
     return 0;
-    /*vector<string> bgcomm;
-    int bg_count = splitAmpersand(enteredcmd, bgcomm);
-    if(bg_count > 1) {
-        cmd->isComposite = true;
-        cmd->isBackground = false;
-        cmd->isPipe = false;
-        for(auto s : bgcomm) {
-            cmd->bgCmds.push_back(new Command(s));
-            parseCommand(s, cmd->bgCmds[cmd->bgCmds.size()-1]);
-        }
-    }
-    else {
-        cmd->isComposite = false;
-        if(enteredcmd[enteredcmd.length()-1] == '&') cmd->isBackground = true;
-        vector<string> pipecomm;
-        int pipe_count = splitPipe(enteredcmd, pipecomm);
-        if(pipe_count > 1) {
-            cmd->isPipe = true;
-            for(auto s : pipecomm) {
-                cmd->pipeCmds.push_back(new Command(s));
-                parseCommand(s, cmd->pipeCmds[cmd->pipeCmds.size()-1]);
-            }
-        }
-        else {
-            cmd->isPipe = false;
-        }
-    }*/
 }
 
 void sigintHandler(int signo) {
-    // if(waitingFor.size() > 1) {
-    //     pid_t pid = waitingFor[waitingFor.size()-1];
-    //     if(kill(pid, SIGINT) < 0) {
-    //         cerr<<"ERROR:: kill() to pid["<<pid<<"] failed [SIGINT]"<<endl;
-    //     }
-    //     waitingFor.pop_back();
-    // }
     if(!jumpaction) return;
     siglongjmp(backtoprompt, 42);
 }
 
 void sigtstpHandler(int signo) {
-    // signal(SIGINT, SIG_IGN);
-    // signal(SIGTSTP, SIG_IGN);
-    // kill(getpid(),SIGTSTP);
     pause();
 }
 
 int executeSimpleCommand(Command* cmd, int inFD, int outFD) {
     cout<<"Simple CMD : "<<cmd->enteredCmd<<endl;
-    pid_t pid;
-    if(cmd->isBackground) {
-        // Push to background, spawn a new process
-        // cout<<"background"<<endl;
-        if((pid = fork()) == 0) {
-            signal(SIGINT, SIG_IGN);
-            signal(SIGTSTP, SIG_IGN);
-            if(inFD != STDIN_FILENO) {
-                dup2(inFD, STDIN_FILENO);
-                close(inFD);
-            }
-            // cout<<"DUPIN"<<endl;
-            if(outFD != STDOUT_FILENO) {
-                dup2(outFD, STDOUT_FILENO);
-                close(outFD);
-            }
-            // cout<<"DUPOUT"<<endl;
-            // cout<<"Execvp call by child\n";
-            int status = execvp(cmd->tokens[0], cmd->tokens.data());
-            exit(status);
+    pid_t pid, pgid = 0;
+    pid = fork();
+    if(pid == 0) {
+        pid = getpid();
+        if(pgid == 0) pgid = pid;
+        setpgid(pid, pgid);
+        if(!cmd->isBackground)
+            tcsetpgrp(shell_terminal, pgid);
+        signal (SIGINT, SIG_DFL);
+        signal (SIGQUIT, SIG_DFL);
+        signal (SIGTSTP, SIG_DFL);
+        signal (SIGTTIN, SIG_DFL);
+        signal (SIGTTOU, SIG_DFL);
+        signal (SIGCHLD, SIG_DFL);
+        if(inFD != STDIN_FILENO) {
+            dup2(inFD, STDIN_FILENO);
+            close(inFD);
         }
-        else {
-            return 0;
-        }            
+        // cout<<"DUPIN"<<endl;
+        if(outFD != STDOUT_FILENO) {
+            dup2(outFD, STDOUT_FILENO);
+            close(outFD);
+        }
+        // cout<<"DUPOUT"<<endl;
+        int status = execvp(cmd->tokens[0], cmd->tokens.data());
+        exit(status);
     }
     else {
-        // Normal process executions
-        // cout<<"normal single command"<<endl;
-        if((pid = fork()) == 0) {
-            // pid_t child = getpid();
-            setpgid(getpid(), getpid());
-            // tcsetpgrp(STDIN_FILENO, getpgid(getpid()));
-            signal(SIGINT, SIG_DFL);
-            signal(SIGTSTP, SIG_DFL);
-            signal(SIGTTIN, SIG_IGN);
-            if(inFD != STDIN_FILENO) {
-                dup2(inFD, STDIN_FILENO);
-                close(inFD);
-            }
-            // cout<<"DUPIN"<<endl;
-            if(outFD != STDOUT_FILENO) {
-                dup2(outFD, STDOUT_FILENO);
-                close(outFD);
-            }
-            // cout<<"DUPOUT"<<endl;
-            // cout<<"Execvp call by child\n";
-            int status = execvp(cmd->tokens[0], cmd->tokens.data());
-            exit(status);
-        }
-        else {
-            waitingFor.push_back(pid);
-            setpgid(pid, pid);
-            // wait(NULL);
-            int status;
-            pid_t x = waitpid(pid, &status, WUNTRACED);
-            cout<<"Wait status : "<<status<<endl;
-            // cout<<"Waiting stopped.."<<endl;
-            if(!WIFEXITED(status) && WIFSTOPPED(status)) {
-                cout<<"stopped by : "<<WSTOPSIG(status)<<endl;
-                cout<<"Resuming child["<<pid<<"] now..."<<x<<endl;
-                try  {
-                    kill(pid, SIGCONT);
-                } catch (...) {
-                    cerr<<"ERROR:: signal transmission SIGCONT failed. "<<endl;
-                }
-            }
-            return 0;
-        }
+        if(!pgid) pgid = pid;
+        setpgid(pid, pgid);
     }
+
+    if(!cmd->isBackground) {
+        tcsetpgrp(shell_terminal, pgid);
+        int status;
+        pid_t x = waitpid(pid, &status, WUNTRACED);
+        cout<<"Wait Status : "<<status<<endl;
+        cout<<"Waiting stopped.."<<endl;
+        if(!WIFEXITED(status) && WIFSTOPPED(status)) {
+            cout<<"Stopped by : "<<WSTOPSIG(status)<<endl;
+            cout<<"Resuming child["<<pid<<"] now..."<<x<<endl;
+            if(kill(-pid, SIGCONT) < 0) {
+                cerr<<"ERROR:: transmission of SIGCONT failed."<<endl;
+            }
+        }
+        tcsetpgrp(shell_terminal, shell_pgid);
+        struct termios job_tmodes;
+        tcgetattr(shell_terminal, &job_tmodes);
+        tcsetattr(shell_terminal, TCSADRAIN, &shell_tmodes);    
+    }
+    else{
+        // cout<<"Background execution"<<endl;
+    }
+    return 0;
 }
 
 
@@ -467,7 +398,7 @@ int executeCommand(Command* cmd) {
 
 }
 
-int fetchHistory(deque<string>& history) {
+int loadHistory(deque<string>& history) {
     string history_file = "./mybash_history";
     ifstream file_in(history_file);
     string line;
@@ -491,8 +422,39 @@ int saveHistory(deque<string>& history) {
     return 0;
 }
 
-string searchHistory(deque<string>& history) {
-    return string("");
+int lcs(string &X, string &Y) {
+    int m = X.length(), n = Y.length();
+    int L[2][n + 1];
+    bool f;
+    for (int i = 0; i <= m; i++) {
+        f = i & 1;
+        for (int j = 0; j <= n; j++) {
+            if (i == 0 || j == 0) L[f][j] = 0;
+            else if (X[i-1] == Y[j-1]) L[f][j] = L[1 - f][j - 1] + 1;
+            else L[f][j] = max(L[1 - f][j], L[f][j - 1]);
+        }
+    }
+    return L[f][n];
+}
+
+int searchHistory(deque<string>& history, string& searchstr) {
+    set<pair<int,int>> lcsindex;
+
+    for(int i = 0; i < history.size(); i++) {
+        lcsindex.insert(make_pair(-lcs(history[i], searchstr), -i));
+    }
+
+    pair<int,int> result = *(lcsindex.begin());
+    if(result.first == 0) {
+        return -1;
+    } else {
+        return -result.second;
+    }
+}
+
+int handleMultiwatch(string entered_cmd) {
+    // start
+    return 0;
 }
 
 void testParser() {
@@ -512,21 +474,38 @@ int main () {
     enableRawMode();
 
     // waitingFor.push_back(-1);
-
     string enteredcmd;
-    deque<string> history;
 
-    fetchHistory(history);
+    loadHistory(history);
     parent = getpid();
-    signal(SIGINT, sigintHandler);
-    signal(SIGTSTP, SIG_IGN);
-    setpgid(parent, parent);
-    tcsetpgrp(STDIN_FILENO, parent);
+
+    shell_terminal = STDIN_FILENO;
+    while (tcgetpgrp (shell_terminal) != (shell_pgid = getpgrp ()))
+    kill (- shell_pgid, SIGTTIN);
+
+    signal (SIGINT, SIG_IGN);
+    signal (SIGQUIT, SIG_IGN);
+    signal (SIGTSTP, SIG_IGN);
+    signal (SIGTTIN, SIG_IGN);
+    signal (SIGTTOU, SIG_IGN);
+    signal (SIGCHLD, SIG_IGN);
+
+    shell_pgid = getpid ();
+    if (setpgid (shell_pgid, shell_pgid) < 0)
+    {
+        perror ("Couldn't put the shell in its own process group");
+        exit (1);
+    }
+
+    tcsetpgrp (shell_terminal, shell_pgid);
+
+    tcgetattr (shell_terminal, &shell_tmodes);
+
     // testParser();
-    int i = 0;
+    // int i = 0;
     // vector<string> cmdi = {"ls &", "wc|sed &", "ls | wc", "ls"};
+    
     while(1) {
-        signal(SIGTSTP, SIG_IGN);
         cout<<">>> ";
         readLine(enteredcmd);
         if (enteredcmd.empty()) {
@@ -551,10 +530,14 @@ int main () {
             }
             continue;
         }
+        if(enteredcmd.compare("multiwatch") == 0) {
+            cout<<"Starting multiwatch..."<<endl;
+            if(handleMultiwatch(enteredcmd)) {
 
-        // autocomplete for files
+            }
+        }
 
-        // check for ctrl c, ctrl z, ctrl r
+        // check for  ctrl r
 
         // implement utilities like cd, exit, help, etc
 
@@ -573,7 +556,6 @@ int main () {
             cout<<"^C"<<endl;
         }
         jumpaction = 1;
-        
     }
 
     saveHistory(history);
