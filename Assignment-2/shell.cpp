@@ -648,18 +648,6 @@ int parseCommand(string entered_cmd, vector<Command*>& watchedCmds) {
 }
 
 int handleMultiwatch(string entered_cmd) {
-    // start
-    // Parse commands into a vector<Command*>
-    // Open as many file descriptors as there are commands
-    // Fork the commands
-    // Give the write access to the commands
-    // Collect all the read descriptors in a separate FD_set
-    // Select from FD_set
-    // Use some identification for which process was selected
-    // keep printing until all child do not stop
-    // do the pgid voodoo here to stop on ctrl c
-    // end
-    // doubt : how will these process take inputs ? or do we assume them to work without inputs
     pid_t surrogate, surrogate_grp = 0;
     surrogate = fork();
     if(surrogate == 0) {
@@ -818,7 +806,6 @@ int autocomplete(string& line) {
 		return ERROR;
 	}
 
-	// Refer http://pubs.opengroup.org/onlinepubs/7990989775/xsh/readdir.html
 	// for readdir()
 	// Excluding '.' and '..' for autocompletion
 	while ((de = readdir(dr)) != NULL) {
