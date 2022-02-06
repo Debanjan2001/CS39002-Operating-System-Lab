@@ -21,12 +21,25 @@ using namespace std;
 #include <stdio.h>
 #include <setjmp.h>
 #include <errno.h>
+#include <dirent.h>
 
 struct termios original;
 
 #define BACKSPACE 127
 #define MAXHISTSIZE 1000
 #define MAX_BUFFER_SIZE 1024
+#define ERROR -1
+#define OK 0
+
+/* ************ Helper Functions ******************/
+int autocomplete(string &);
+string readInteger();
+void readLine(string &);
+void tokenizeCommand(string &, vector<char *> &);
+int splitPipe(string &, vector<string> &);
+void searchHistory();
+/* ***********************************************/
+
 
 vector<pid_t> waitingFor;
 static sigjmp_buf backtoprompt;
@@ -91,8 +104,13 @@ public:
 
 void readLine(string& line) {
 	// clear any buffer present in line from earlier operations
+    cout << ">>> ";
 	line.clear();
 	char ch;
+
+    int askedHistoryIndex = history.size();
+    int historyLen = history.size();
+
 	while (true) {
 		ch = getchar();
 		if (ch == BACKSPACE) {
@@ -106,11 +124,74 @@ void readLine(string& line) {
 			}
 		} else if (ch == '\t') {
 			// Autocomplete
+            int status = autocomplete(line);
+			if (status == ERROR) {
+				// In case of failure
+                line.clear();
+				cout << ">>> ";
+			}
 		}
         else if (iscntrl(ch) && ch == 18) {
             // CTRL R pressed
-            // wait for autocomplete
+            // search
+            while(!line.empty()){
+                line.pop_back();
+    			cout << "\b \b";
+            }
+            searchHistory();
+            break;
         }
+		else if(ch==27){
+			// Any Escape Sequence like arrows
+			int count = 0;
+			bool isUpArrow = true, isDownArrow = true;
+			while((ch = getchar())!=EOF){
+				count += 1;
+				// cout<<"\nRead :"<<ch<<endl;
+				// Not an arrow
+				if(count == 1 && ch != '[' ){
+					isUpArrow = false;
+					isDownArrow = false;
+				}
+				if( count == 2){
+					if(ch!='A'){
+						isUpArrow = false;
+					}	
+					if(ch!='B'){
+						isDownArrow = false;
+					}
+				}
+				if(count >=2){
+					break;
+				}
+			}
+			// cout<<"Was it up? "<<isUpArrow<<endl;
+			// cout<<"Was it down? "<<isDownArrow<<endl;
+            
+            if(!isUpArrow && !isDownArrow){
+                continue;
+            }
+
+			if(isUpArrow){
+                if(askedHistoryIndex <= 0){
+                    continue;
+                }
+                askedHistoryIndex -= 1;
+			}else if(isDownArrow){
+                if(askedHistoryIndex >= historyLen - 1){
+                    continue;
+                }
+                askedHistoryIndex += 1;
+			}
+
+            while(!line.empty()){
+                line.pop_back();
+                cout<<"\b \b";
+            }
+            // cout<<"Asked "<<askedHistoryIndex<<endl;
+            line = history[askedHistoryIndex];
+            cout<<line;
+		}
 		else  if (ch == '\n') {
 			// Newline
 			cout << "\n";
@@ -429,33 +510,82 @@ int saveHistory(deque<string>& history) {
     return 0;
 }
 
-int lcs(string &X, string &Y) {
+int lcs(const string &X, const string &Y) {
     int m = X.length(), n = Y.length();
     int L[2][n + 1];
     bool f;
+    int maxlen = 0;
     for (int i = 0; i <= m; i++) {
         f = i & 1;
         for (int j = 0; j <= n; j++) {
-            if (i == 0 || j == 0) L[f][j] = 0;
-            else if (X[i-1] == Y[j-1]) L[f][j] = L[1 - f][j - 1] + 1;
-            else L[f][j] = max(L[1 - f][j], L[f][j - 1]);
+            if (i == 0 || j == 0){
+                L[f][j] = 0;
+            }
+            else if (X[i-1] == Y[j-1]) {
+              L[f][j] = L[1 - f][j - 1] + 1;
+              maxlen = max(maxlen, L[f][j]);
+            }else {
+                L[f][j] = 0;
+            }
         }
     }
-    return L[f][n];
+    return maxlen;
 }
 
-int searchHistory(deque<string>& history, string& searchstr) {
-    set<pair<int,int>> lcsindex;
-
-    for(int i = 0; i < history.size(); i++) {
-        lcsindex.insert(make_pair(-lcs(history[i], searchstr), -i));
+void searchHistory(){
+    cout<<"Enter search term: ";
+    char ch;
+    string line;
+    while(true){
+        ch = getchar();
+        if(ch=='\t' || (iscntrl(ch) && ch==18)){
+           continue;
+        }
+        else if(ch=='\n'){
+            cout<<endl;
+            break;
+        }
+        else if(ch == BACKSPACE){
+            if (line.empty()) {
+				continue;
+			}
+			cout << "\b \b"; //Cursor moves 1 position backwards
+			line.pop_back();
+        }
+        else{
+            cout<<ch;
+            line += ch;
+        }
     }
 
-    pair<int,int> result = *(lcsindex.begin());
-    if(result.first == 0) {
-        return -1;
-    } else {
-        return -result.second;
+    vector<int> lcsArray;
+    int maxCommonLen=0;
+    for(int i=0;i<history.size();++i){
+        string& cmd=history[i];
+        int common = lcs(line,cmd);
+        lcsArray.push_back(common);
+        maxCommonLen = max(maxCommonLen, common);
+    }
+
+    set<string> matches;
+    for(int i=0;i<history.size();++i){
+        if(history[i].length() == lcsArray[i]) {
+            matches.insert(history[i]);
+        }
+        if(lcsArray[i] == maxCommonLen && maxCommonLen > 2){
+            matches.insert(history[i]);
+        }
+    }
+
+    if(matches.empty()){
+        cout<<"No match for search term in history"<<endl;
+    }else{
+        cout<<"#Command(s) found: "<<matches.size() <<endl;
+        int count=0;
+        for(const string &cmd:matches){
+            cout<<count+1<<". "<<cmd<<endl;
+            ++count;
+        }
     }
 }
 
@@ -650,22 +780,160 @@ int handleMultiwatch(string entered_cmd) {
     }
 }
 
-void testParser() {
-    vector<string> cmd = {"ls &", "wc|sed &", "ls | wc", "ls"};
-    for(int i = 0; i < 4; i++) {
-        Command* command = new Command(cmd[i]);
-        parseCommand(cmd[i], command);
-        cout<<command->isPipe<<" "<<command->isComposite<<" "<<command->isBackground<<endl;
-        for(auto i : command->pipeCmds) {
-            cout<<"\t"<<i->isPipe<<" "<<i->isComposite<<" "<<i->isBackground<<endl;
-        }
-    }
+string readInteger() {
+	string num = "";
+	char ch;
+	while (true) {
+		ch = getchar();
+		if (ch == '\n') {
+			cout << endl;
+			break;
+		} else if ( ch == '\t') {
+			continue;
+		} else if (ch == BACKSPACE) {
+			if (num.empty()) {
+				continue;
+			}
+			cout << "\b \b"; //Cursor moves 1 position backwards
+			num.pop_back();
+		} else {
+			cout << ch;
+			num += ch;
+		}
+
+	}
+	return num;
+}
+
+int autocomplete(string& line) {
+	vector<string> dirItems;
+	struct dirent *de;  // Pointer for directory entry
+
+	// opendir() returns a pointer of DIR type.
+	DIR *dr = opendir(".");
+
+	if (dr == NULL)  // opendir returns NULL if couldn't open directory
+	{
+		cerr << "opendir error(): Could not open current directory for autocompletion" << endl;
+		return ERROR;
+	}
+
+	// Refer http://pubs.opengroup.org/onlinepubs/7990989775/xsh/readdir.html
+	// for readdir()
+	// Excluding '.' and '..' for autocompletion
+	while ((de = readdir(dr)) != NULL) {
+		if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) {
+			continue;
+		}
+		dirItems.push_back(string(de->d_name));
+	}
+
+	int last = line.length() - 1;
+	while (last >= 0) {
+		if (line[last] == ' ') {
+			break;
+		}
+		last--;
+	}
+
+	int lengthOfLastToken = line.length() - 1 - last;
+	string lastToken = line.substr(last + 1, lengthOfLastToken);
+	// cout<<"token"<<" "<<lastToken<<endl;
+
+	vector<string> matches;
+	int maxMatchLength = -1;
+	for (auto s : dirItems) {
+		int matchLen = 0;
+		for (int i = 0; i < min(s.length(), lastToken.length()); i++) {
+			if (s[i] != lastToken[i]) {
+				break;
+			}
+			matchLen += 1;
+		}
+
+		if (matchLen > maxMatchLength) {
+			maxMatchLength = matchLen;
+			matches.clear();
+			matches.push_back(s);
+		} else if (matchLen == maxMatchLength) {
+			matches.push_back(s);
+		}
+	}
+
+	// cout<<"\nSize => "<<matches.size()<<endl;
+	// cout<<"Len => "<<maxMatchLength<<endl;
+
+	if (matches.empty()) {
+		return OK;
+	} else if (matches.size() == 1) {
+
+		while (lastToken.length() > maxMatchLength) {
+			lastToken.pop_back();
+			line.pop_back();
+			cout << "\b \b";
+		}
+
+		while (lastToken.length() < matches[0].length()) {
+			int index = lastToken.length();
+			char ch = matches[0][index];
+			lastToken += ch;
+			line += ch;
+			cout << ch;
+		}
+	} else {
+		cout << endl;
+		cout << "Displaying " << matches.size() << " Possibilities" << endl;
+		cout << "Press the corresponding serial number to autocomplete" << endl;
+		for (int i = 0; i < matches.size(); i++) {
+			cout << i + 1 << ". " << matches[i] << endl;
+		}
+
+		cout << "Enter your choice: ";
+		string num = readInteger();
+
+		int userChoice = -1;
+		try {
+			userChoice = stoi(num);
+		} catch (const std::exception& e) {
+			// do nothing
+		}
+
+		if (userChoice < 1 || userChoice > matches.size() ) {
+			cout << "Your choice is invalid" << endl;
+			line.clear();
+			return ERROR;
+		}
+
+		cout << ">>> " << line;
+		userChoice -= 1;
+
+		while (lastToken.length() > maxMatchLength) {
+			lastToken.pop_back();
+			line.pop_back();
+			cout << "\b \b";
+		}
+
+		while (lastToken.length() < matches[userChoice].length()) {
+			int index = lastToken.length();
+			char ch = matches[userChoice][index];
+			lastToken += ch;
+			line += ch;
+			cout << ch;
+		}
+	}
+
+	return OK;
 }
 
 int main () {
 
     enableRawMode();
-
+    cout << "     \n\
+            O   \n\
+           \\|/  \n\
+            |   \n\
+           / \\ \n\
+    Wake up Neo...\n";
     // waitingFor.push_back(-1);
     string enteredcmd;
 
@@ -694,12 +962,7 @@ int main () {
 
     tcgetattr (shell_terminal, &shell_tmodes);
 
-    // testParser();
-    // int i = 0;
-    // vector<string> cmdi = {"ls &", "wc|sed &", "ls | wc", "ls"};
-    
     while(1) {
-        cout<<">>> ";
         readLine(enteredcmd);
         if (enteredcmd.empty()) {
 			// cout << "You have not entered anything!\n";
