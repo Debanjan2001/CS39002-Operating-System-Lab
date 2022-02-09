@@ -408,6 +408,9 @@ int executeSimpleCommand(Command* cmd, int inFD, int outFD, int mw_mode = 0) {
         }
         // cout<<"DUPOUT"<<endl;
         int status = execvp(cmd->tokens[0], cmd->tokens.data());
+        if(status == -1) {
+            cerr<<"ERROR:: command not found."<<endl;
+        }
         exit(status);
     }
     else {
@@ -915,12 +918,12 @@ int autocomplete(string& line) {
 int main () {
 
     enableRawMode();
-    cout << "     \n\
-            O   \n\
-           \\|/  \n\
-            |   \n\
-           / \\ \n\
-    Wake up Neo...\n";
+    // cout << "     \n\
+    //         O   \n\
+    //        \\|/  \n\
+    //         |   \n\
+    //        / \\ \n\
+    // Wake up Neo...\n";
     // waitingFor.push_back(-1);
     string enteredcmd;
 
