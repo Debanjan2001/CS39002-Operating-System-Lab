@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <semaphore.h>
 #include <sys/ipc.h>
+#include<chrono>
 
 #include <sys/shm.h>
 using namespace std;
@@ -26,7 +27,7 @@ using namespace std;
  * Fork NW Worker processes and code the worker behavior
  * 
  * Two challenges:  the updation of status fields appropriately to denote if all blocks of the given job are to be done or not
- *                  second, the mutex locking mechanism or whatever the hell that is
+ *                  second, the mutex locking mechanism
  * 
  * The last position of the queue should be kept reserved for computations,
  * so that should be coded in the producer behavior to wait while there is less than or equal to 1 position on the queue.
@@ -69,10 +70,6 @@ typedef struct sham {
     int count;  
     // Mutex for shared_mem variables
     sem_t mutex;
-    // Mutex for updation of matrix blocks
-    sem_t cmatmutexes[4];
-    // Semaphore for Full
-	sem_t update; 
     // Semaphore for Empty
 	sem_t empty;  
 } SharedMem;
@@ -85,11 +82,6 @@ SharedMem* initializeSHM(SharedMem* shmem) {
 
     int sema = sem_init(&(shmem->mutex), 1, 1);
     
-    for(int i = 0; i < 4; i++) {
-        sema += sem_init(&(shmem->cmatmutexes[i]), 1, 1);
-    }
-    sema += sem_init(&(shmem->update), 1, 1);
-    // sema += sem_init(&(shmem->full), 1, 0);
     sema += sem_init(&(shmem->empty), 1, Q_SIZE);
     if(sema < 0) {
         cerr<<"ERROR:: [ shm_init() ] failed to initialize semaphores/mutexes.\n";
@@ -113,7 +105,11 @@ Job* CreateJob(int producenum) {
     j->matrixId = (rand()%MAXID) + 1;
     for(int i = 0; i < N; i ++) {
         for(int k = 0; k < N; k ++) {
-            j->matrix[i][k] = (i==k);//(rand()%(2*RANGE+1)) - RANGE;
+
+            //=============== Verification ==================
+            // j->matrix[i][k] = ((i==k) ? 2:0); // if matrix = 2.I,  Trace = N*(2^JOBS)
+            //===============================================
+            j->matrix[i][k] = (rand()%(2*RANGE+1)) - RANGE;
         }
     }
     return j;
@@ -213,6 +209,7 @@ int main() {
     cout<<">>> Initialized the Shared Memory.\n";
 
     clock_t start = clock();
+    std::chrono::steady_clock::time_point time_begin = std::chrono::steady_clock::now();
 
     for(int i = 0; i < NP; i++) {
         cout<<">>> FORKING ("<<i+1<<") Producer...\n";
@@ -225,6 +222,7 @@ int main() {
             // handle Producer
 
             int chshmid = shmget(key, sizeof(SharedMem), IPC_CREAT | 0666);
+            assert(chshmid == shmid);
             if(chshmid < 0) {
                 cerr<<"ERROR:: [ shmget() ] failed to get a shared memory space.\n";
                 exit(EXIT_FAILURE);
@@ -237,25 +235,31 @@ int main() {
                 // wait for a random time from 0-3s
                 sleep(rand()%4);
 
-                // create a new computing job
-                Job* newjob = CreateJob(i);
-
-                // if the queue is not empty wait
+                /*
+                ================= DEBUG  ====================
                 // int x1,x2;
                 // sem_getvalue(&(shm->empty),&x1);sem_getvalue(&(shm->mutex),&x2);
                 // cout<<"Create"<<x1<<", "<<x2<<endl;
-                sem_wait(&(shm->mutex));
-                // sem_wait(&(shm->empty));
-
+                =============================================
+                */
+                
                 // wait to gain access to the shared memory control variables
+                sem_wait(&(shm->mutex));
                 
                 // if already required jobs are created, stop generating
                 if(shm->jobsCreated == MAXJOBS) {
-                    // sem_post(&(shm->empty));
                     sem_post(&(shm->mutex));
                     break;
                 }
-                else if(shm->count < Q_SIZE-1){
+                
+
+                if(shm->count < Q_SIZE-1){
+                    // if the queue is not empty wait
+                    sem_wait(&(shm->empty));
+
+                    // create a new computing job
+                    Job* newjob = CreateJob(i);
+
                     // else insert the generated job into the queue if the count < 0
                     InsertJob(shm, newjob);
 
@@ -266,13 +270,8 @@ int main() {
                     // increment the job counter
                     shm->jobsCreated++;
 
-                    // increment the full counter
-                    // sem_post(&(shm->full)); 
                 }
-                // else {
-                //     sem_post(&(shm->empty));
-                // }
-
+              
                 // surrender access to shared memory control variables
                 sem_post(&(shm->mutex));
             }
@@ -296,7 +295,6 @@ int main() {
         }
         else  if(pid == 0) {
             // handle Worker
-
             int chshmid = shmget(key, sizeof(SharedMem), IPC_CREAT | 0666);
             if(chshmid < 0) {
                 cerr<<"ERROR:: [ shmget() ] failed to get a shared memory space.\n";
@@ -330,15 +328,21 @@ int main() {
                     if(shm->jobQueue[shm->outPointer].status == 0 &&
                        shm->jobQueue[(shm->outPointer+1)%Q_SIZE].status == 0) {
                         // if(shm->count <= Q_SIZE-1) {
-                            // int x1,x2;
-                            // sem_getvalue(&(shm->empty),&x1);sem_getvalue(&(shm->mutex),&x2);
-                            // cout<<"Result"<<x1<<", "<<x2<<endl;
-                            // sem_wait(&(shm->empty));
-                            cout<<">>> [PID::"<<getpid()<<"]First Access for Jobs : ("<<shm->jobQueue[shm->outPointer].matrixId<<", "<<shm->jobQueue[(shm->outPointer+1)%Q_SIZE].matrixId<<") \n";
-                            int resPointer = InsertResultJob(shm);
-                            shm->jobQueue[shm->outPointer].resultIndex = resPointer;
-                            shm->jobQueue[(shm->outPointer+1)%Q_SIZE].resultIndex = resPointer;
-                            cout<<">>> [PID::"<<getpid()<<"]Result Segment created for Jobs : ("<<shm->jobQueue[shm->outPointer].matrixId<<", "<<shm->jobQueue[(shm->outPointer+1)%Q_SIZE].matrixId<<") : "<<shm->jobQueue[resPointer].matrixId<<" \n";
+
+                        /*
+                        ================= DEBUG  ====================
+                        // int x1,x2;
+                        // sem_getvalue(&(shm->empty),&x1);sem_getvalue(&(shm->mutex),&x2);
+                        // cout<<"Create"<<x1<<", "<<x2<<endl;
+                        =============================================
+                        */
+                        sem_wait(&(shm->empty));
+                        cout<<">>> [PID::"<<getpid()<<"]First Access for Jobs : ("<<shm->jobQueue[shm->outPointer].matrixId<<", "<<shm->jobQueue[(shm->outPointer+1)%Q_SIZE].matrixId<<") \n";
+                        int resPointer = InsertResultJob(shm);
+                        shm->jobQueue[shm->outPointer].resultIndex = resPointer;
+                        shm->jobQueue[(shm->outPointer+1)%Q_SIZE].resultIndex = resPointer;
+                        cout<<">>> [PID::"<<getpid()<<"]Result Segment created for Jobs : ("<<shm->jobQueue[shm->outPointer].matrixId<<", "<<shm->jobQueue[(shm->outPointer+1)%Q_SIZE].matrixId<<") : "<<shm->jobQueue[resPointer].matrixId<<" \n";
+                    
                         // }
                     }
                     
@@ -357,8 +361,8 @@ int main() {
                         shm->outPointer %= Q_SIZE;
                         shm->count-=2;
 
-                        // sem_post(&(shm->empty));
-                        // sem_post(&(shm->empty));
+                        sem_post(&(shm->empty));
+                        sem_post(&(shm->empty));
                     }
                     
                     // surrender the access to shared memory control variables
@@ -368,11 +372,16 @@ int main() {
                     // 00 01
                     // 10 11
                     int cblockindex = ((status1>>1)&1)*2 + (status2&1);
-                    // sem_wait(&(shm->update));
                     sem_wait(&(shm->mutex));
-                    // int x1, x2;
+
+                    /*
+                    ================= DEBUG  ====================
+                    // int x1,x2;
                     // sem_getvalue(&(shm->empty),&x1);sem_getvalue(&(shm->mutex),&x2);
-                    // cout<<x1<<", "<<x2<<endl;
+                    // cout<<"Create"<<x1<<", "<<x2<<endl;
+                    =============================================
+                    */
+
                     cout<<">>> [PID::"<<getpid()<<"]Updating C Block for : ("<<shm->jobQueue[resPointer].matrixId<<") : "<<"("<<cblockindex<<") \n";
 
                     // copy the result of this worker into the corresponding block
@@ -383,6 +392,8 @@ int main() {
                         }
                     }
 
+                    /*
+                    ================= DEBUG  ====================
                     // printf("********************\n");
                     // for(int m = 0; m < N; m++) {
                     //     for(int n = 0; n  < N; n++) {
@@ -391,13 +402,12 @@ int main() {
                     //     printf("\n");
                     // }
                     // printf("********************\n");
+                    =============================================
+                    */
 
                     // unlock access to the result array block
                     cout<<"\n";
-                    // sem_post(&(shm->update));
                     sem_post(&(shm->mutex));  
-                    // sem_getvalue(&(shm->empty),&x1);sem_getvalue(&(shm->mutex),&x2);
-                    // cout<<x1<<", "<<x2<<endl;                  
                 }
             }
             shmdt(shm);
@@ -412,28 +422,25 @@ int main() {
     while(1) {
         sem_wait(&(shmem->mutex));
         if((shmem->jobsCreated == MAXJOBS) && (shmem->count == 1)) {
-            // for(int i = 0; i < 4; i++) {
-            //     sem_wait(&(shmem->cmatmutexes[i]));
-            // }
+            
             for(int i = 0 ; i < NP; i++) {
                 kill(producers[i], SIGTERM);
             }
             for(int i = 0; i < NW; i++) {
                 kill(workers[i], SIGTERM);
             }
-            // for(int i = 0; i < 4; i++) {
-            //     sem_post(&(shmem->cmatmutexes[i]));
-            // }
+
+            sem_post(&(shmem->mutex));
             break;
-            
         }
         
         sem_post(&(shmem->mutex));
     }
     
     clock_t end = clock();
+    std::chrono::steady_clock::time_point time_end = std::chrono::steady_clock::now();
 
-    double elapsed_time = (end-start)/CLOCKS_PER_SEC;
+    double elapsed_clocks = (end-start)/CLOCKS_PER_SEC;
     int trace = 0;
     for(int i = 0; i < N; i++) {
         trace += shmem->jobQueue[shmem->outPointer].matrix[i][i];
@@ -441,7 +448,8 @@ int main() {
     sem_destroy(&(shmem->mutex));
 
     cout<<">>> Finished executing : "<<MAXJOBS<<" jobs. \n";
-    cout<<">>> Total Time Elapsed : "<<elapsed_time<<" seconds.\n";
+    cout<<">>> Total Clocks Elapsed : "<<elapsed_clocks<<" clocks.\n";
+    cout<<">>> Total Time Elapsed : "<< std::chrono::duration_cast<std::chrono::milliseconds>(time_end-time_begin).count() << "[ms]" << endl;
     cout<<">>> Final Trace        : "<<trace<<" .\n";
 
     shmdt(shmem);
