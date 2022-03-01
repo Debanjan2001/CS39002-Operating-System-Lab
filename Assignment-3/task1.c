@@ -9,38 +9,39 @@
 #include <sys/shm.h>
 
 typedef struct subJob {
-    double** A;
-    double** B;
-    double** C;
+    double* A;
+    double* B;
+    double* C;
     int len1;
     int len2;
     int r;
     int c;
 }subJob;
 
-void scanMatrix(double** mat, int r, int c) {
+void scanMatrix(double* mat, int r, int c) {
     for(int i = 0; i < r; i++) {
         for(int j = 0; j < c; j++) {
-            scanf("%lf", (double*)(mat + i*c + j));
+            scanf("%lf", (mat + i*c + j));
         }
     }
 }
 
-void printMatrix(double** mat, int r, int c) {
+void printMatrix(double* mat, int r, int c) {
     for(int i = 0; i < r; i++) {
         for(int j = 0; j < c; j++) {
-            printf("%lf ", *((double*)(mat + i*c + j)));
+            printf("%lf ", *(mat + i*c + j));
         }
         printf("\n");
     }
 }
 
-void multVec(subJob* subjob, int col1, int col2) {
+void multVec(subJob* subjob) {
     double ans = 0.0;
+    int col1 = subjob->len1, col2 = subjob->len2;
     for(int i = 0; i < subjob->len1; i++) {
-        ans += (*((double *)(subjob->A + (subjob->r)*col1 + i)))*(*((double *)(subjob->B + i*col2 + subjob->c))) ;
+        ans += (*((subjob->A + (subjob->r)*col1 + i)))*(*((subjob->B + i*col2 + subjob->c))) ;
     }
-    *((double *)(subjob->C + subjob->r*col2 + subjob->c)) = ans;
+    *((subjob->C + subjob->r*col2 + subjob->c)) = ans;
     // printf("\t>>> ans(%d,%d) = %lf\n", subjob->r, subjob->c, ans);
     return ;
 } 
@@ -63,9 +64,9 @@ int main() {
     
     printf(">>> Shared Memory created.\n");
 
-    double** A = shmat(shmid, NULL, 0);
-    double** B = A + (sizeof(double) * r1 * c1);
-    double** C = B + (sizeof(double) * r2 * c2);
+    double* A = shmat(shmid, NULL, 0);
+    double* B = A + (r1 * c1);
+    double* C = B + (r2 * c2);
 
     printf(">>> Matrix pointers init.\n");
 
@@ -94,12 +95,12 @@ int main() {
                     printf("ERROR:: [ shmget() ] failed to get a shared memory space.\n");
                     exit(EXIT_FAILURE);
                 }
-                double** childA = shmat(child_shmid, NULL, 0);
-                double** childB = childA + (sizeof(double) * r1 * c1);
-                double** childC = childB + (sizeof(double) * r2 * c2);
+                double* childA = shmat(child_shmid, NULL, 0);
+                double* childB = childA + (r1 * c1);
+                double* childC = childB + (r2 * c2);
 
                 subJob eleij = {childA, childB, childC, c1, c2, i, j};
-                multVec(&eleij, c1, c2);
+                multVec(&eleij);
 
                 shmdt(childA);
 
