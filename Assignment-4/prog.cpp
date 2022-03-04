@@ -29,6 +29,7 @@ typedef struct job_ {
     int duration;
     int num_child_jobs;
     struct job_ * child_jobs[MAX_CHILD_JOBS];
+    int num_completed_child;
     pthread_mutex_t mutex;
     int status; 
     job_() {
