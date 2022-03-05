@@ -115,19 +115,19 @@ void* producer_thread_handler(void* param) {
         for(;;) {
 
             // int count_jobs;
-            pthread_mutex_lock(&shmem->in_mutex);
+            // pthread_mutex_lock(&shmem->in_mutex);
+            // pthread_mutex_lock(&shmem->mutex);
+            // shmem->counter ++;
+            // if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
+            // pthread_mutex_unlock(&shmem->mutex);
+            // pthread_mutex_unlock(&shmem->in_mutex);
             pthread_mutex_lock(&shmem->mutex);
-            shmem->counter ++;
-            if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
-            pthread_mutex_unlock(&shmem->mutex);
-            pthread_mutex_unlock(&shmem->in_mutex);
-
             j = rand()%(shmem->count_jobs);
-
-            pthread_mutex_lock(&shmem->mutex);
-            shmem->counter--;
-            if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
             pthread_mutex_unlock(&shmem->mutex);
+            // pthread_mutex_lock(&shmem->mutex);
+            // shmem->counter--;
+            // if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
+            // pthread_mutex_unlock(&shmem->mutex);
 
 
             int x = pthread_mutex_trylock(&shmem->job_queue[j].mutex);
@@ -139,13 +139,15 @@ void* producer_thread_handler(void* param) {
             pthread_mutex_unlock(&shmem->job_queue[j].mutex);
         }
 
-        pthread_mutex_lock(&shmem->in_mutex);
-        pthread_mutex_lock(&shmem->rw_mutex);
+        // pthread_mutex_lock(&shmem->in_mutex);
+        // pthread_mutex_lock(&shmem->rw_mutex);
 
+        pthread_mutex_lock(&shmem->mutex);
         job* newjob = insert_new_job(shmem);
+        pthread_mutex_unlock(&shmem->mutex);
 
-        pthread_mutex_unlock(&shmem->rw_mutex);
-        pthread_mutex_unlock(&shmem->in_mutex);
+        // pthread_mutex_unlock(&shmem->rw_mutex);
+        // pthread_mutex_unlock(&shmem->in_mutex);
 
         cout<<"Job Inserted by [prod_thread : "<<thisthread<<", job_id : "<<newjob->job_id<<" ] "<<endl;
         if(newjob != NULL) {    
@@ -175,19 +177,19 @@ void* consumer_thread_handler(void* param) {
 
         int count_jobs;
 
-        pthread_mutex_lock(&shmem->in_mutex);
+        // pthread_mutex_lock(&shmem->in_mutex);
+        // pthread_mutex_lock(&shmem->mutex);
+        // shmem->counter ++;
+        // if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
+        // pthread_mutex_unlock(&shmem->mutex);
+        // pthread_mutex_unlock(&shmem->in_mutex);
         pthread_mutex_lock(&shmem->mutex);
-        shmem->counter ++;
-        if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
-        pthread_mutex_unlock(&shmem->mutex);
-        pthread_mutex_unlock(&shmem->in_mutex);
-
         count_jobs = shmem->count_jobs;
-
-        pthread_mutex_lock(&shmem->mutex);
-        shmem->counter--;
-        if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
         pthread_mutex_unlock(&shmem->mutex);
+        // pthread_mutex_lock(&shmem->mutex);
+        // shmem->counter--;
+        // if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
+        // pthread_mutex_unlock(&shmem->mutex);
     
         int all_done = 1;
         for(int i = count_jobs-1; i >= 0; i--) {
@@ -263,7 +265,7 @@ int main() {
 
     pthread_t producers[num_prod_threads];
     
-    int key = 1089;
+    int key = 490;
     int shmid = shmget(key, sizeof(shmem_t), IPC_CREAT | 0666);
     if(shmid < 0) {
         cerr<<"ERROR :: shmget()"<<endl;
