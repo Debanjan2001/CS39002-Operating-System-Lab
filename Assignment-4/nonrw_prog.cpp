@@ -11,10 +11,22 @@
  
 using namespace std;
 
-#define MAX_CHILD_JOBS 100
-#define MAX_JOBQ_SIZE 1000
+#define SHM_KEY 120
+
+#define MAX_CHILD_JOBS 2000
+#define MAX_JOBQ_SIZE 2000
+
 #define JOB_ID 100'000'000
 #define JOB_DURATION 250
+
+#define PROD_RUN_TIME_RANGE 11
+#define PROD_RUN_TIME_OFFSET 10
+
+#define PROD_SLEEP_RANGE 301
+#define PROD_SLEEP_OFFSET 200
+
+#define INIT_TREE_RANGE 201
+#define INIT_TREE_OFFSET 300
 
 typedef struct job_ {
     /**
@@ -61,10 +73,10 @@ void init(shmem_t* shmem) {
 
     pthread_mutexattr_init(&attrmutex);
     pthread_mutexattr_setpshared(&attrmutex, PTHREAD_PROCESS_SHARED);
-
+    pthread_mutex_init(&shmem->mutex, &attrmutex);
     pthread_mutex_init(&shmem->in_mutex, &attrmutex);
     pthread_mutex_init(&shmem->rw_mutex, &attrmutex);
-    pthread_mutex_init(&shmem->mutex, &attrmutex);
+    
     
 }
 
@@ -77,7 +89,7 @@ job* insert_new_job(shmem_t* shmem) {
     shmem->job_queue[i].job_id = (rand())%JOB_ID + 1;
 
     /** */
-    shmem->job_queue[i].duration = (rand())%20 + 1;
+    shmem->job_queue[i].duration = (rand())%JOB_DURATION + 1;
     /** */
 
     pthread_mutexattr_t attrmutex;
@@ -98,36 +110,47 @@ void* producer_thread_handler(void* param) {
     shmem_t * shmem = ((struct thread_data *)param)->shmem;
 
     /** */
-    int time_to_run = rand()%2 + 1;
+    int time_to_run = rand()%PROD_RUN_TIME_RANGE + PROD_RUN_TIME_OFFSET;
     /** */
 
     time_t start_time, end_time;
-    start_time = time(NULL);
+    time(&start_time);
+    int over_flag = 0;
 
     while(1) {
 
-        end_time = time(NULL);
+        time(&end_time);
         if(end_time-start_time >= time_to_run) break;
         int j = -1;
+
+        
+
 
         // This section may be put before the for(;;). Try once evrything works.
 
         for(;;) {
+            pthread_mutex_lock(&shmem->job_queue[0].mutex);
+                if(shmem->job_queue[0].status != 0) {
+                    pthread_mutex_unlock(&shmem->job_queue[0].mutex);
+                    over_flag = 1;
+                    break;
+            }
+            pthread_mutex_unlock(&shmem->job_queue[0].mutex);
 
             // int count_jobs;
-            // pthread_mutex_lock(&shmem->in_mutex);
-            // pthread_mutex_lock(&shmem->mutex);
-            // shmem->counter ++;
-            // if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
-            // pthread_mutex_unlock(&shmem->mutex);
-            // pthread_mutex_unlock(&shmem->in_mutex);
+            pthread_mutex_lock(&shmem->in_mutex);
             pthread_mutex_lock(&shmem->mutex);
-            j = rand()%(shmem->count_jobs);
+            shmem->counter ++;
+            if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
             pthread_mutex_unlock(&shmem->mutex);
+            pthread_mutex_unlock(&shmem->in_mutex);
             // pthread_mutex_lock(&shmem->mutex);
-            // shmem->counter--;
-            // if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
+            j = rand()%(shmem->count_jobs);
             // pthread_mutex_unlock(&shmem->mutex);
+            pthread_mutex_lock(&shmem->mutex);
+            shmem->counter--;
+            if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
+            pthread_mutex_unlock(&shmem->mutex);
 
 
             int x = pthread_mutex_trylock(&shmem->job_queue[j].mutex);
@@ -138,16 +161,19 @@ void* producer_thread_handler(void* param) {
             }
             pthread_mutex_unlock(&shmem->job_queue[j].mutex);
         }
+        if(over_flag == 1) {
+            break;
+        }
 
-        // pthread_mutex_lock(&shmem->in_mutex);
-        // pthread_mutex_lock(&shmem->rw_mutex);
+        pthread_mutex_lock(&shmem->in_mutex);
+        pthread_mutex_lock(&shmem->rw_mutex);
 
-        pthread_mutex_lock(&shmem->mutex);
+        // pthread_mutex_lock(&shmem->mutex);
         job* newjob = insert_new_job(shmem);
-        pthread_mutex_unlock(&shmem->mutex);
+        // pthread_mutex_unlock(&shmem->mutex);
 
-        // pthread_mutex_unlock(&shmem->rw_mutex);
-        // pthread_mutex_unlock(&shmem->in_mutex);
+        pthread_mutex_unlock(&shmem->rw_mutex);
+        pthread_mutex_unlock(&shmem->in_mutex);
 
         cout<<"Job Inserted by [prod_thread : "<<thisthread<<", job_id : "<<newjob->job_id<<" ] "<<endl;
         if(newjob != NULL) {    
@@ -158,7 +184,7 @@ void* producer_thread_handler(void* param) {
         pthread_mutex_unlock(&shmem->job_queue[j].mutex);
 
         /** */
-        int sleeptime = rand()%301 + 200;
+        int sleeptime = rand()%PROD_SLEEP_RANGE + PROD_SLEEP_OFFSET;
         /** */
 
         struct timespec sleep_time = {0, 1'000'000L * sleeptime};
@@ -177,19 +203,19 @@ void* consumer_thread_handler(void* param) {
 
         int count_jobs;
 
-        // pthread_mutex_lock(&shmem->in_mutex);
-        // pthread_mutex_lock(&shmem->mutex);
-        // shmem->counter ++;
-        // if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
-        // pthread_mutex_unlock(&shmem->mutex);
-        // pthread_mutex_unlock(&shmem->in_mutex);
+        pthread_mutex_lock(&shmem->in_mutex);
         pthread_mutex_lock(&shmem->mutex);
-        count_jobs = shmem->count_jobs;
+        shmem->counter ++;
+        if(shmem->counter == 1) pthread_mutex_lock(&shmem->rw_mutex);
         pthread_mutex_unlock(&shmem->mutex);
+        pthread_mutex_unlock(&shmem->in_mutex);
         // pthread_mutex_lock(&shmem->mutex);
-        // shmem->counter--;
-        // if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
+        count_jobs = shmem->count_jobs;
         // pthread_mutex_unlock(&shmem->mutex);
+        pthread_mutex_lock(&shmem->mutex);
+        shmem->counter--;
+        if(shmem->counter == 0) pthread_mutex_unlock(&shmem->rw_mutex);
+        pthread_mutex_unlock(&shmem->mutex);
     
         int all_done = 1;
         for(int i = count_jobs-1; i >= 0; i--) {
@@ -260,12 +286,12 @@ int main() {
     cout<<"Process A starting..."<<endl;
 
     /** */
-    int num_prod_threads = 10, num_consumer_threads = 20;
+    int num_prod_threads = 10, num_consumer_threads = 32;
     /** */
 
     pthread_t producers[num_prod_threads];
     
-    int key = 490;
+    int key = SHM_KEY;
     int shmid = shmget(key, sizeof(shmem_t), IPC_CREAT | 0666);
     if(shmid < 0) {
         cerr<<"ERROR :: shmget()"<<endl;
@@ -282,12 +308,14 @@ int main() {
 
 
     /** */
-    int init_num_jobs = rand()%2 + 2;
+    int init_num_jobs = rand()%INIT_TREE_RANGE + INIT_TREE_OFFSET;
     /** */
 
-
-    for(int i = 0; i < init_num_jobs; i++) {
+    job* root = insert_new_job(shmem);
+    for(int i = 0; i < init_num_jobs-1; i++) {
         job* j = insert_new_job(shmem);
+        root->child_jobs[root->num_child_jobs] = j;
+        root->num_child_jobs ++;
     }
 
     struct thread_data args[num_prod_threads];
