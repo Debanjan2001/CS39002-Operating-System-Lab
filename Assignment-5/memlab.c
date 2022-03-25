@@ -1,18 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
-#define INT 1
+#define BOOL 1
 #define CHAR 2
-#define BOOL 3
-#define MEDINT 4
+#define MEDINT 3
+#define INT 4
 
+typedef size_t addrs_t;
 static size_t word_size = 4;
 
 size_t var_size(int var_type) {
     switch(var_type) {
-        case 1: return 4;
+        case 1: return 1;
         case 2: return 1;
         case 3: return 3;
-        case 4: return 1;
+        case 4: return 4;
         default: return 4;
     }
 }
@@ -89,10 +90,12 @@ int create_var(mmu_t* mmu, int var_type) {
         if(h->size >= word_size) {
             break;
         }
+        h = h->next;
     }
 
     if(h == NULL) {
-        printf("ERROR:: out of memory. \n");
+        printf("ERROR:: create_var() : out of memory. \n");
+        exit(EXIT_SUCCESS);
     }
 
     /**
@@ -126,10 +129,43 @@ int create_var(mmu_t* mmu, int var_type) {
     newalloc->alloc_size = word_size;
     newalloc->data_type = var_type;
 
+    newalloc->next = mmu->alloc_list.head;
+    if(mmu->alloc_list.head != NULL) {
+        mmu->alloc_list.head->prev = newalloc;
+    } else {
+        mmu->alloc_list.tail = newalloc; 
+    }
+    mmu->alloc_list.head = newalloc;
 
+    return thisvar;
+}
 
+void assign_var(mmu_t* mmu, size_t index, int value, int var_type) {
+    /**
+     * @brief Search the index in allocated slots table.
+     * 
+     */
+    alloc_t* block = mmu->alloc_list.head;
+    while(block != NULL) {
+        if(block->index == index) {
+            break;
+        }
+        block = block->next;
+    }
 
-
+    /**
+     * @brief Check the block found, if any. 
+     * @doubt How to enforce type checking ?
+     */
+    if(block == NULL) {
+        printf("ERROR:: assign_var() : invalid memory access. \n");
+        exit(EXIT_SUCCESS);
+    } else {
+        if(var_type > block->data_type) {
+            printf("WARNING:: assign_var() : type mismatch. implicit cast may result in data loss.");
+        }
+        *((int *)(mmu->baseptr + block->index)) = value;
+    } 
 }
 
 int main() {
