@@ -56,12 +56,12 @@ struct segment {
     size_t size;
 
     // only used for variable segments; map which position are free and what are occupied
-    unsigned int bitmap;
+    u_int32_t bitmap;
 
-    // info : 8'b0 8'b0 8'b0 00000000
-    //                              ^last bit of info denotes if this is an array segment or a variable segment
-    //                            ^^the two bits before that specify the var_type of this array or variable segment
-    unsigned int info;
+    // info : 00000000
+    //               ^last bit of info denotes if this is an array segment or a variable segment
+    //             ^^the two bits before that specify the var_type of this array or variable segment
+    u_int8_t info;
 
     segment* next;
 };
@@ -78,6 +78,7 @@ struct segment_list_t {
 struct books {
     free_list_t* free_list;
     segment_list_t* segment_list;
+    size_t seg_counter;
 };
 
 // struct for memory management unit
@@ -91,16 +92,17 @@ mmu_t* create_mem (mmu_t* mmu, size_t size) {
     mmu->baseptr = malloc(size);
 
     // book-keeping space allocation
-    size_t book_size = size/2; // Revision 1: compute more carefully
-    size_t free_list_size = size/4; // Revision 1: compute more carefully
-    mmu->vmm = (books*) malloc(book_size);
+    // size_t book_size = size/2; // Revision 1: compute more carefully
+    // size_t free_list_size = size/4; // Revision 1: compute more carefully
+    mmu->vmm = (books*) malloc(sizeof(books));
+    mmu->vmm->seg_counter = 0;
 
     /**
      * @a Review_Required : How to do this ? Brain not working.
      * 
      */
-    mmu->vmm->free_list = (free_list_t*) mmu->vmm;
-    mmu->vmm->segment_list = (segment_list_t*) mmu->vmm + free_list_size;
+    // mmu->vmm->free_list = (free_list_t*) mmu->vmm;
+    // mmu->vmm->segment_list = (segment_list_t*) mmu->vmm + free_list_size;
 
     /**
      * @brief INIT : free_list with one big hole and other counter if required etc.
@@ -111,7 +113,7 @@ mmu_t* create_mem (mmu_t* mmu, size_t size) {
 } 
 
 
-addrs create_var (mmu_t* mmu, var_type t) {
+addrs create_var (mmu_t* mmu, var_type type) {
     /**
      * @brief search the variable part of the segment list;
      *          if appropriate slot found; 
@@ -125,6 +127,63 @@ addrs create_var (mmu_t* mmu, var_type t) {
      *              done;
      * 
      */
+    segment* s = mmu->vmm->segment_list->var_head;
+    addrs var = 0;
+    while(s != mmu->vmm->segment_list->arr_head) {
+        if (s->info>>1 == type) { 
+            if (s->bitmap & static_cast<u_int32_t>(0xFFFF)) {
+                int i = 0;
+                while((s->bitmap & 1<<i) == 0) {
+                    i++;
+                    if(i == 32) break;
+                }
+                s->bitmap = s->bitmap | 1<<i;
+                var = s->seg_num<<5 + i;
+                return var;
+            }
+        }
+        s = s->next;
+    }
+
+    /** find a free hole enough for 32*4 bytes, if not: ( @a Review_Required : if not what to do? )
+     */
+    hole* h = mmu->vmm->free_list->head;
+    while(h != NULL) {
+        if(h->size >= 32){
+            break;
+        } else {
+            h = h->next;
+        }
+    }
+
+    if(h!=NULL)  {
+        segment* newseg = (segment*) malloc(sizeof(segment));
+        newseg->info = static_cast<u_int32_t>(0);
+        newseg->info |= 1;
+        newseg->info |= type<<1;
+        newseg->size = 32;
+        newseg->seg_num = mmu->vmm->seg_counter ++;
+        newseg->baseptr = h->baseptr;
+        insert_after_segment(newseg, mmu);
+
+        h->baseptr += 32;
+        h->size -= 32;
+        if(h->size == 0) {
+            delete_hole(mmu, h);
+        }
+
+        newseg->bitmap |= 1;
+        var = newseg->seg_num<<5;
+        return var;
+    }
+    else {
+        /**
+         * @brief Lets see;
+         * 
+         */
+    }
+
+
 }
 
 
