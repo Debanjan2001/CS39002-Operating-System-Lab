@@ -6,6 +6,8 @@ using namespace std;
 
 typedef size_t addrs;
 const bool GC_ENABLE = false;
+const size_t word_size = 4; 
+const u_int32_t slab_full_indicator = static_cast<u_int32_t>(0xFFFF);
 
 /**
  * @brief enum for var_type + function for var_size(var_type)
@@ -74,7 +76,9 @@ struct segment {
     // info : 00000000
     //               ^last bit of info denotes if this is an array segment or a variable segment
     //              ^reserved for mark and sweep
-    //            ^^the two bits before that specify the var_type of this array or variable segment             
+    //             ^shows if the segment is present in gc_stack
+    //           ^^the two bits before that specify the var_type of this array or variable segment   
+    //                     
     u_int8_t info;
 
     segment* next;
@@ -144,15 +148,17 @@ addrs create_var (mmu_t* mmu, var_type type) {
     segment* s = mmu->vmm->segment_list->var_head;
     addrs var = 0;
     while(s != mmu->vmm->segment_list->arr_head) {
-        if (s->info>>2 == type) { 
-            if (s->bitmap & static_cast<u_int32_t>(0xFFFF)) {
+        if (s->info>>3 == type) { 
+            if (s->bitmap != slab_full_indicator) {
                 int i = 0;
                 while((s->bitmap & 1<<i) == 0) {
                     i++;
                     if(i == 32) break;
                 }
-                s->bitmap = s->bitmap | 1<<i;
-                var = s->seg_num<<5 + i;
+                s->bitmap = (s->bitmap | (1<<i));
+                var = ((s->seg_num<<5 )+ i);
+
+                gc_push(s);
                 return var;
             }
         }
@@ -163,65 +169,162 @@ addrs create_var (mmu_t* mmu, var_type type) {
      */
     hole* h = mmu->vmm->free_list->head;
     while(h != NULL) {
-        if(h->size >= 32){
+        if(h->size >= 32*word_size){
             break;
         } else {
             h = h->next;
         }
     }
 
-    if(h!=NULL)  {
-        segment* newseg = (segment*) malloc(sizeof(segment));
-        newseg->info = static_cast<u_int32_t>(0);
-        newseg->info |= 1;
-        newseg->info |= type<<1;
-        newseg->size = 32;
-        newseg->seg_num = mmu->vmm->seg_counter ++;
-        newseg->baseptr = h->baseptr;
-        insert_after_segment(newseg, mmu);
-
-        h->baseptr += 32;
-        h->size -= 32;
-        if(h->size == 0) {
-            delete_hole(mmu, h);
-        }
-
-        newseg->bitmap |= 1;
-        var = newseg->seg_num<<5;
-        return var;
+    if(h == NULL){
+        cerr<<"Fatal Error :: assign_var() : Out of memory"<<endl;
+        exit(EXIT_FAILURE);
     }
-    else {
-        /**
-         * @brief Lets see;
-         * 
-         */
+    segment* newseg = (segment*) malloc(sizeof(segment));
+    newseg->info = static_cast<u_int32_t>(0);
+    newseg->info |= 1;
+    newseg->info |= type<<3;
+    newseg->size = 32 ;
+    newseg->seg_num = mmu->vmm->seg_counter ++;
+    newseg->baseptr = h->baseptr;
+
+    insert_after_segment(newseg, mmu);
+
+    h->baseptr += 32;
+    h->size -= 32;
+    if(h->size == 0) {
+        delete_hole(mmu, h);
     }
 
-
+    newseg->bitmap |= 1;
+    var = newseg->seg_num<<5;
+    return var;
 }
 
-
-void assign_var (mmu_t* mmu, addrs var, var_type t, int value) {
+void assign_var (mmu_t* mmu, addrs var, var_type type, int value) {
     /**
      * @brief use var to find segment index and variable index, check for type mismatch, use memcpy and variable size
      * 
      */
+
+    segment *s = mmu->vmm->segment_list->var_head;
+    addrs var_actual_addr_offset = 0; 
+
+    while(s!=NULL){
+        addrs lookup_range_min = (s->seg_num << 5);
+        addrs lookup_range_max = lookup_range_min + 31;
+        if(var >= lookup_range_min && var <= lookup_range_max){
+            // Found the segment where it was declared;
+            // Set the offset, var = i + seg_num * 32, where 'i' in [0,31]
+            var_actual_addr_offset = var - lookup_range_min;
+            break;
+        }
+        s = s->next;
+    }
+
+
+    if(s==NULL){
+        cerr<<"Fatal Error:: assign_var() : Invalid Memory Assignment"<<endl;
+        exit(EXIT_FAILURE);
+    }
+
+    u_int8_t cur_var_type = (s->info >> 3);
+    if( cur_var_type != type ){
+        cerr << "Fatal Error:: assign_arr() : Data type mismatch during array assignment" << endl;
+        exit(EXIT_FAILURE);
+    }
+
+    void *var_mem_baseptr = (void * )(s->baseptr + var_actual_addr_offset * word_size);
+    memcpy( var_mem_baseptr , (void *)&value, sizeof(int));
 }
 
 
-addrs create_arr (mmu_t* mmu, var_type t) {
+addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
     /**
      * @brief similar to create_var, but we dont have to wait check first, we just create after finding a space.
-     * 
+     *
      */
+
+    size_t required_arr_size = (size_t)(arr_size) * word_size;
+    hole* h = mmu->vmm->free_list->head;
+
+    while(h!=NULL){
+        if(h->size >= required_arr_size){
+            break;
+        }
+        h=h->next;
+    }
+
+    if(h==NULL){
+        /**
+         * @brief 
+         * No free space found?
+         */
+
+        cerr<<"Fatal Error :: assign_arr() : No free space available"<<endl;
+        exit(EXIT_FAILURE);
+    }
+
+
+    segment *arr_seg = (segment *)malloc(sizeof(segment));
+    arr_seg->baseptr = h->baseptr;
+    arr_seg->info = static_cast<u_int32_t>(0);
+    arr_seg->info |= (type<<3);
+    arr_seg->bitmap = 0;
+    arr_seg->size = required_arr_size;
+    arr_seg->seg_num = mmu->vmm->seg_counter++;
+
+    /**
+     * @brief 
+     * Return seg_num as the token for this array. It should be enough for searching
+     */
+    addrs var = arr_seg->seg_num;
+
+    insert_after_segment(arr_seg, mmu);
+
+
+    h->baseptr += required_arr_size;
+    h->size -= required_arr_size;
+
+    if(h->size == 0){
+        delete_hole(mmu, h);
+    }   
+
+    return var;
 }
 
 
-void assign_arr (mmu_t* mmu, addrs arr, var_type t, int value) {
+void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
     /**
      * @brief similar to assign_arr
      * 
      */
+
+    segment *s = mmu->vmm->segment_list->arr_head;
+    
+    while(s!=NULL){
+        if(s->seg_num == arr){
+            break;
+        }
+        s=s->next;
+    }
+
+    if(s==NULL){
+        cerr << "Fatal Error:: assign_arr() : Invalid Array Assignment" << endl;
+        exit(EXIT_FAILURE);
+    }
+
+    u_int8_t arr_type = ((s->info) >> 3); 
+    if(type != arr_type){
+        cerr << "Fatal Error:: assign_arr() : Data type mismatch during array assignment" << endl;
+        exit(EXIT_FAILURE);
+    }
+
+    int arr_size = (int)(s->size / word_size);
+    for(int i=0;i<arr_size;i++){
+        void *memptr = (void *)(s->baseptr + i*word_size);
+        memcpy(memptr, (void *)&value, sizeof(int));
+    }
 }
 
 
@@ -306,6 +409,7 @@ void gc_pop_frame() {
     // delete all nodes part of the current frame, insert after the current base pointer
     while(h != rbp) {
         gc_stack->top = h->next;
+        h->seg->info = h->seg->info ^ (1<<2); // denote it absence from the stack
         free(h);
         h = gc_stack->top;
     }
@@ -324,7 +428,8 @@ void gc_sweep() {
     while(s != NULL) {
         if(s->info & 1<<1) {
             // live segment, do not touch
-            // reset the 
+            // reset the bit
+            s->info = s->info ^ (1<<1);
         } else {
             // delete segment; add to hole list; and all;
             free_segment(s);
@@ -359,7 +464,7 @@ void gc_run() {
     gc_mark();
     gc_sweep();
     // wait for compaction criteria to satisfy.
-    
+
 }
 
 void gc_init() {
@@ -370,15 +475,16 @@ void gc_init() {
     gc_stack->rbp = gc_stack->top;
 
     // Spawn a thread and call gc_run(); ??
-
     
 }
 
 void gc_push(segment* s) {
-    gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
-    newnode->seg = s;
-    newnode->next = gc_stack->top;
-    gc_stack->top = newnode;
-
+    if(s->info & (1<<2)) {
+        gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+        newnode->seg = s;
+        newnode->next = gc_stack->top;
+        gc_stack->top = newnode;
+        s->info = s->info | (1<<2);
+    }
     return;
 }
