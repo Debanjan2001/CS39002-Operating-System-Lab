@@ -1,10 +1,11 @@
 #include <iostream>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 using namespace std;
 
 typedef size_t addrs;
+const bool GC_ENABLE = false;
 
 /**
  * @brief enum for var_type + function for var_size(var_type)
@@ -24,6 +25,18 @@ size_t var_size(var_type v) {
     else if(v == BOOL) return 1;
     else return 0;
 }
+
+struct gc_stack_node {
+    segment* seg;
+    gc_stack_node* next;
+};
+
+struct gc_stack_t {
+    gc_stack_node* top;
+    gc_stack_node* rbp;
+};
+
+gc_stack_t* gc_stack = NULL;
 
 struct hole {
     hole* prev;
@@ -60,7 +73,8 @@ struct segment {
 
     // info : 00000000
     //               ^last bit of info denotes if this is an array segment or a variable segment
-    //             ^^the two bits before that specify the var_type of this array or variable segment
+    //              ^reserved for mark and sweep
+    //            ^^the two bits before that specify the var_type of this array or variable segment             
     u_int8_t info;
 
     segment* next;
@@ -130,7 +144,7 @@ addrs create_var (mmu_t* mmu, var_type type) {
     segment* s = mmu->vmm->segment_list->var_head;
     addrs var = 0;
     while(s != mmu->vmm->segment_list->arr_head) {
-        if (s->info>>1 == type) { 
+        if (s->info>>2 == type) { 
             if (s->bitmap & static_cast<u_int32_t>(0xFFFF)) {
                 int i = 0;
                 while((s->bitmap & 1<<i) == 0) {
@@ -218,9 +232,153 @@ void free_elem (mmu_t* mmu, addrs var) {
      * @a Review_Required : should we just delete var segment if the bitmap is all 0
      * 
      */
+    segment* s = mmu->vmm->segment_list->var_head;
+    bool isVar = 0;
+    while(s != NULL) {
+        if((s->info & 1) && (s->seg_num<<5 <= var && var < (s->seg_num+1)<<5)) {
+            isVar = 1;
+            break;
+        } else if(!(s->info & 1) && s->seg_num == var) {
+            isVar = 0;
+            break;
+        }
+        s = s->next;
+    }
+
+    if(s == NULL) {
+        cerr << "ERROR :: illegal memory delete request. " << endl ;
+        return;
+    } else if (isVar) {
+        int offset = var - s->seg_num<<5;
+        s->bitmap = s->bitmap & ~(1<<offset);
+        if(s->bitmap == 0) {
+            // delete segment and add to hole if !GC_ENABLE otherwise just MARK ;
+            if(GC_ENABLE) {
+                // mark the segment
+                s->info = s->info | (1<<1);
+            } else {
+                // function will handle deleting the segment node and adding to the free_list
+                free_segment(mmu, s);
+            }
+        } else {
+            // done;
+        }
+    } else {
+        // delete segment and add to hole if !GC_ENABLE otherwise just MARK ;
+        if(GC_ENABLE) {
+            // mark the segment
+            s->info = s->info | (1<<1);
+        } else {
+            // function will handle deleting the segment node and adding to the free_list
+            free_segment(mmu, s);
+        }
+    }
+    return;
 }
 
-void gc_compact();
-void gc_run();
-void gc_init();
-void gc_push();
+void push_rbp() {
+    gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+    newnode->seg = (segment*)(gc_stack->rbp);
+    newnode->next = gc_stack->top;
+
+    gc_stack->top = newnode;
+    gc_stack->rbp = gc_stack->rbp;
+}
+
+void gc_mark() {
+    // mark all segments currently in the stack as alive.S
+    gc_stack_node* h = gc_stack->top;
+    gc_stack_node* rbp = gc_stack->rbp;
+    while(h != NULL) {
+        if(h == rbp) {
+            rbp = (gc_stack_node*)((rbp)->seg);
+        } else {
+            h->seg->info = h->seg->info | (1<<1);
+        }
+        h = h->next;
+    }
+} 
+
+void gc_pop_frame() {
+    gc_stack_node* h = gc_stack->top;
+    gc_stack_node* rbp = gc_stack->rbp;
+
+    // delete all nodes part of the current frame, insert after the current base pointer
+    while(h != rbp) {
+        gc_stack->top = h->next;
+        free(h);
+        h = gc_stack->top;
+    }
+
+    if(h == rbp) {
+        // repostion the base pointer to the prev frame base pointer and delete the rbp node.
+        gc_stack->rbp = (gc_stack_node*)(gc_stack->rbp->seg);
+        gc_stack->top = h->next;
+        free(h);
+        h = gc_stack->top;
+    }
+}
+
+void gc_sweep() {
+    segment* s = segment_list->var_head;
+    while(s != NULL) {
+        if(s->info & 1<<1) {
+            // live segment, do not touch
+            // reset the 
+        } else {
+            // delete segment; add to hole list; and all;
+            free_segment(s);
+        }
+    }
+    return;
+}
+
+void gc_compact(mmu_t* mmu) {
+    // compute new baseptr locations for all segments
+    // memcpy to these locations
+    // update free list 
+    size_t baseptr = 0;
+    segment* s = mmu->vmm->segment_list->var_head;
+    while(s != NULL) {
+        memcpy(mmu->baseptr + baseptr, mmu->baseptr+s->baseptr, s->size);
+        s->baseptr = baseptr;
+        baseptr = baseptr + s->size;
+    }
+
+    hole* h = mmu->vmm->free_list->head;
+    while(h->next != NULL) {
+        delete_hole(h);
+    }
+    if(h->next == NULL) {
+        h->size += h->baseptr - baseptr;
+        h->baseptr = baseptr;
+    }
+}
+
+void gc_run() {
+    gc_mark();
+    gc_sweep();
+    // wait for compaction criteria to satisfy.
+    
+}
+
+void gc_init() {
+    // Insert a sentinel node at the bottom of the stack
+    gc_stack->top = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+    gc_stack->top->seg = 0;
+    gc_stack->top->next = NULL;
+    gc_stack->rbp = gc_stack->top;
+
+    // Spawn a thread and call gc_run(); ??
+
+    
+}
+
+void gc_push(segment* s) {
+    gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+    newnode->seg = s;
+    newnode->next = gc_stack->top;
+    gc_stack->top = newnode;
+
+    return;
+}
