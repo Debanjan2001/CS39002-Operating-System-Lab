@@ -39,6 +39,7 @@ struct gc_stack_t {
 };
 
 gc_stack_t* gc_stack = NULL;
+pthread_mutex_t book_lock;
 
 struct hole {
     hole* prev;
@@ -104,6 +105,129 @@ struct mmu_t {
     void* baseptr; // actual physical address
     books* vmm; // pointer to book-keeping space
 };
+
+segment* get_segment_head(mmu_t* mmu) {
+    if(mmu->vmm->segment_list->var_head == NULL) {
+        return mmu->vmm->segment_list->arr_head;
+    }
+    return mmu->vmm->segment_list->var_head;
+}
+
+void insert_after_segment(mmu_t* mmu, segment* n) {
+    if(n->info & 1) {
+        // variable segment insert at var_tail
+        if(mmu->vmm->segment_list->var_head == NULL) {
+            mmu->vmm->segment_list->var_head = n;
+            mmu->vmm->segment_list->var_tail = n;
+            mmu->vmm->segment_list->var_tail->next = NULL;
+            mmu->vmm->segment_list->var_tail->prev = NULL;
+            if(mmu->vmm->segment_list->arr_head != NULL) {
+                mmu->vmm->segment_list->arr_head->prev = mmu->vmm->segment_list->var_tail;
+                mmu->vmm->segment_list->var_tail =  mmu->vmm->segment_list->arr_head;
+            }
+        } else {
+            n->next = mmu->vmm->segment_list->var_tail->next;
+            n->prev = mmu->vmm->segment_list->var_tail;
+            mmu->vmm->segment_list->var_tail = n;
+
+            if(mmu->vmm->segment_list->var_tail->next != NULL) {
+                mmu->vmm->segment_list->var_tail->next->prev = mmu->vmm->segment_list->var_tail;
+            }
+        }
+    } else {
+        // array segment insert at arr_tail
+        if(mmu->vmm->segment_list->arr_head == NULL) {
+            mmu->vmm->segment_list->arr_head = n;
+            mmu->vmm->segment_list->arr_tail = n;
+            mmu->vmm->segment_list->arr_tail->next = NULL;
+            mmu->vmm->segment_list->arr_tail->prev = NULL;
+
+            if( mmu->vmm->segment_list->var_tail != NULL) {
+                mmu->vmm->segment_list->arr_head->prev =  mmu->vmm->segment_list->var_tail;
+                mmu->vmm->segment_list->var_tail->next =  mmu->vmm->segment_list->arr_head;
+            }
+        } else {
+            n->next = NULL;
+            n->prev = mmu->vmm->segment_list->arr_tail;
+            mmu->vmm->segment_list->arr_tail = n;
+        }
+    }
+}
+
+void free_segment (mmu_t* mmu, segment* seg) {
+    hole* h = (hole*) malloc(sizeof(hole));
+    h->baseptr = seg->baseptr;
+    h->size = seg->size;
+    h->next = NULL;
+    h->prev = NULL;
+
+    hole* loc = mmu->vmm->free_list->head;
+    while(loc != NULL) {
+        if(loc->baseptr > h->baseptr) break;
+        loc = loc->next;
+    }
+    if(loc == NULL) {
+        if(mmu->vmm->free_list->tail != NULL && mmu->vmm->free_list->tail->baseptr + mmu->vmm->free_list->tail->size == h->baseptr) {
+            mmu->vmm->free_list->tail->size += h->size;
+            free(h);
+        } else {
+            if(mmu->vmm->free_list->tail == NULL) {
+                mmu->vmm->free_list->head = h;
+                mmu->vmm->free_list->tail = h;
+            } else {
+                h->prev = mmu->vmm->free_list->tail;
+                mmu->vmm->free_list->tail->next = h;
+                mmu->vmm->free_list->tail = h;
+            }
+        }
+    } else {
+        if(loc->prev == NULL) {
+            if(loc->baseptr == h->baseptr + h->size) {
+                loc->size += h->size;
+                loc->baseptr = h->baseptr;
+                free(h);
+            } else {
+                loc->prev = h;
+                h->next = loc;
+                mmu->vmm->free_list->head = h;
+            }
+        } else {
+            h->next = loc->prev->next;
+            h->next->prev = h;
+            loc->prev->next = h;
+            h->prev = loc->prev;
+             
+            if(loc->prev->baseptr + loc->prev->size == h->baseptr) {
+                loc->prev->size += h->size;
+                delete_hole(mmu, h);
+                h = loc->prev;
+            }
+
+            if(h->baseptr + h->size == loc->baseptr) {
+                h->size += loc->size;
+                delete_hole(mmu, loc);
+            }
+
+        }
+    }
+}
+
+void delete_hole (mmu_t* mmu, hole* h) {
+    if(h->next != NULL) {
+        h->next->prev = h->prev;
+    }
+    if(h->prev != NULL) {
+        h->prev->next = h->next;
+    }
+
+    if(h == mmu->vmm->free_list->head) {
+        mmu->vmm->free_list->head = h->next;
+    }
+    if(h == mmu->vmm->free_list->tail) {
+        mmu->vmm->free_list->tail = h->prev;
+    }
+}
+
 
 mmu_t* create_mem (mmu_t* mmu, size_t size) {
     mmu = (mmu_t*) malloc(sizeof(mmu_t));
@@ -188,7 +312,7 @@ addrs create_var (mmu_t* mmu, var_type type) {
     newseg->seg_num = mmu->vmm->seg_counter ++;
     newseg->baseptr = h->baseptr;
 
-    insert_after_segment(newseg, mmu);
+    insert_after_segment(mmu, newseg);
 
     h->baseptr += 32;
     h->size -= 32;
@@ -198,6 +322,7 @@ addrs create_var (mmu_t* mmu, var_type type) {
 
     newseg->bitmap |= 1;
     var = newseg->seg_num<<5;
+    gc_push(newseg);
     return var;
 }
 
@@ -280,7 +405,7 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
      */
     addrs var = arr_seg->seg_num;
 
-    insert_after_segment(arr_seg, mmu);
+    insert_after_segment(mmu, arr_seg);
 
 
     h->baseptr += required_arr_size;
@@ -423,8 +548,8 @@ void gc_pop_frame() {
     }
 }
 
-void gc_sweep() {
-    segment* s = segment_list->var_head;
+void gc_sweep(mmu_t* mmu) {
+    segment* s = mmu->vmm->segment_list->var_head;
     while(s != NULL) {
         if(s->info & 1<<1) {
             // live segment, do not touch
@@ -432,7 +557,7 @@ void gc_sweep() {
             s->info = s->info ^ (1<<1);
         } else {
             // delete segment; add to hole list; and all;
-            free_segment(s);
+            free_segment(mmu, s);
         }
     }
     return;
@@ -452,7 +577,7 @@ void gc_compact(mmu_t* mmu) {
 
     hole* h = mmu->vmm->free_list->head;
     while(h->next != NULL) {
-        delete_hole(h);
+        delete_hole(mmu, h);
     }
     if(h->next == NULL) {
         h->size += h->baseptr - baseptr;
@@ -460,11 +585,18 @@ void gc_compact(mmu_t* mmu) {
     }
 }
 
-void gc_run() {
+void gc_run(mmu_t* mmu) {
     gc_mark();
-    gc_sweep();
-    // wait for compaction criteria to satisfy.
+    gc_sweep(mmu);
+}
 
+void* gc_thread_handler(void* data) {
+    data = (thread_data*) data;
+    mmu = data->mmu;
+    while(1) {
+        sleep(0.5);
+        gc_run(mmu);
+    }
 }
 
 void gc_init() {
@@ -475,7 +607,17 @@ void gc_init() {
     gc_stack->rbp = gc_stack->top;
 
     // Spawn a thread and call gc_run(); ??
-    
+    pthread_mutexattr_t attrmutex;
+
+    pthread_mutexattr_init(&attrmutex);
+    pthread_mutex_init(&book_lock, &attrmutex);
+
+    pthread_t gc_tid;
+    thread_data data;
+    pthread_create(&gc_tid, NULL, gc_thread_handler, (void *)data);
+
+    pthread_join(gc_tid, NULL);
+    return;
 }
 
 void gc_push(segment* s) {
