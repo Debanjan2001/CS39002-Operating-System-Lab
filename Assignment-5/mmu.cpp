@@ -2,12 +2,16 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
+#include <pthread.h>
 using namespace std;
 
 typedef size_t addrs;
-const bool GC_ENABLE = false;
+bool GC_ENABLE = false;
 const size_t word_size = 4; 
 const u_int32_t slab_full_indicator = static_cast<u_int32_t>(0xFFFF);
+
+const unsigned int max_holes = 1000;
 
 /**
  * @brief enum for var_type + function for var_size(var_type)
@@ -28,19 +32,6 @@ size_t var_size(var_type v) {
     else return 0;
 }
 
-struct gc_stack_node {
-    segment* seg;
-    gc_stack_node* next;
-};
-
-struct gc_stack_t {
-    gc_stack_node* top;
-    gc_stack_node* rbp;
-};
-
-gc_stack_t* gc_stack = NULL;
-pthread_mutex_t book_lock;
-
 struct hole {
     hole* prev;
     
@@ -57,6 +48,7 @@ struct free_list_t {
     // linked list of all holes, will remain sorted on hole.baseptr's by implementation
     hole* head;
     hole* tail;
+    size_t size;
 };
 
 struct segment {
@@ -106,6 +98,30 @@ struct mmu_t {
     books* vmm; // pointer to book-keeping space
 };
 
+/**
+ * @brief GC Structures 
+ * 
+ */
+struct gc_stack_node {
+    segment* seg;
+    gc_stack_node* next;
+};
+
+struct gc_stack_t {
+    gc_stack_node* top;
+    gc_stack_node* rbp;
+};
+
+struct thread_data {
+    mmu_t* mmu;
+};
+
+gc_stack_t* gc_stack = NULL;
+pthread_mutex_t book_lock;
+/**
+ * 
+ */
+
 segment* get_segment_head(mmu_t* mmu) {
     if(mmu->vmm->segment_list->var_head == NULL) {
         return mmu->vmm->segment_list->arr_head;
@@ -154,6 +170,23 @@ void insert_after_segment(mmu_t* mmu, segment* n) {
     }
 }
 
+void delete_hole (mmu_t* mmu, hole* h) {
+    if(h->next != NULL) {
+        h->next->prev = h->prev;
+    }
+    if(h->prev != NULL) {
+        h->prev->next = h->next;
+    }
+
+    if(h == mmu->vmm->free_list->head) {
+        mmu->vmm->free_list->head = h->next;
+    }
+    if(h == mmu->vmm->free_list->tail) {
+        mmu->vmm->free_list->tail = h->prev;
+    }
+    mmu->vmm->free_list->size -= 1;
+}
+
 void free_segment (mmu_t* mmu, segment* seg) {
     hole* h = (hole*) malloc(sizeof(hole));
     h->baseptr = seg->baseptr;
@@ -171,6 +204,7 @@ void free_segment (mmu_t* mmu, segment* seg) {
             mmu->vmm->free_list->tail->size += h->size;
             free(h);
         } else {
+            mmu->vmm->free_list->size += 1;
             if(mmu->vmm->free_list->tail == NULL) {
                 mmu->vmm->free_list->head = h;
                 mmu->vmm->free_list->tail = h;
@@ -187,6 +221,7 @@ void free_segment (mmu_t* mmu, segment* seg) {
                 loc->baseptr = h->baseptr;
                 free(h);
             } else {
+                mmu->vmm->free_list->size += 1;
                 loc->prev = h;
                 h->next = loc;
                 mmu->vmm->free_list->head = h;
@@ -196,6 +231,7 @@ void free_segment (mmu_t* mmu, segment* seg) {
             h->next->prev = h;
             loc->prev->next = h;
             h->prev = loc->prev;
+            mmu->vmm->free_list->size += 1;
              
             if(loc->prev->baseptr + loc->prev->size == h->baseptr) {
                 loc->prev->size += h->size;
@@ -212,32 +248,157 @@ void free_segment (mmu_t* mmu, segment* seg) {
     }
 }
 
-void delete_hole (mmu_t* mmu, hole* h) {
-    if(h->next != NULL) {
-        h->next->prev = h->prev;
+void push_rbp() {
+    pthread_mutex_lock(&book_lock);
+    gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+    newnode->seg = (segment*)(gc_stack->rbp);
+    newnode->next = gc_stack->top;
+
+    gc_stack->top = newnode;
+    gc_stack->rbp = gc_stack->rbp;
+    pthread_mutex_unlock(&book_lock);
+}
+
+void gc_mark() {
+    // mark all segments currently in the stack as alive.S
+    gc_stack_node* h = gc_stack->top;
+    gc_stack_node* rbp = gc_stack->rbp;
+    while(h != NULL) {
+        if(h == rbp) {
+            rbp = (gc_stack_node*)((rbp)->seg);
+        } else {
+            h->seg->info = h->seg->info | (1<<1);
+        }
+        h = h->next;
     }
-    if(h->prev != NULL) {
-        h->prev->next = h->next;
+} 
+
+void gc_pop_frame() {
+    pthread_mutex_lock(&book_lock);
+    gc_stack_node* h = gc_stack->top;
+    gc_stack_node* rbp = gc_stack->rbp;
+
+    // delete all nodes part of the current frame, insert after the current base pointer
+    while(h != rbp) {
+        gc_stack->top = h->next;
+        h->seg->info = h->seg->info ^ (1<<2); // denote it absence from the stack
+        free(h);
+        h = gc_stack->top;
     }
 
-    if(h == mmu->vmm->free_list->head) {
-        mmu->vmm->free_list->head = h->next;
+    if(h == rbp) {
+        // repostion the base pointer to the prev frame base pointer and delete the rbp node.
+        gc_stack->rbp = (gc_stack_node*)(gc_stack->rbp->seg);
+        gc_stack->top = h->next;
+        free(h);
+        h = gc_stack->top;
     }
-    if(h == mmu->vmm->free_list->tail) {
-        mmu->vmm->free_list->tail = h->prev;
+    pthread_mutex_unlock(&book_lock);
+}
+
+void gc_compact(mmu_t* mmu) {
+    // compute new baseptr locations for all segments
+    // memcpy to these locations
+    // update free list 
+    size_t baseptr = 0;
+    segment* s = mmu->vmm->segment_list->var_head;
+    while(s != NULL) {
+        memcpy(mmu->baseptr + baseptr, mmu->baseptr+s->baseptr, s->size);
+        s->baseptr = baseptr;
+        baseptr = baseptr + s->size;
+    }
+
+    hole* h = mmu->vmm->free_list->head;
+    while(h->next != NULL) {
+        delete_hole(mmu, h);
+    }
+    if(h->next == NULL) {
+        h->size += h->baseptr - baseptr;
+        h->baseptr = baseptr;
     }
 }
 
 
+void gc_sweep(mmu_t* mmu) {
+    segment* s = mmu->vmm->segment_list->var_head;
+    while(s != NULL) {
+        if(s->info & 1<<1) {
+            // live segment, do not touch
+            // reset the bit
+            s->info = s->info ^ (1<<1);
+        } else {
+            // delete segment; add to hole list; and all;
+            free_segment(mmu, s);
+        }
+    }
+    if(mmu->vmm->free_list->size > max_holes) {
+        gc_compact(mmu);
+    }
+    return;
+}
+void gc_run(mmu_t* mmu) {
+    gc_mark();
+    gc_sweep(mmu);
+}
+
+void* gc_thread_handler(void* data) {
+    thread_data* tdata = (thread_data*) data;
+    mmu_t* mmu = tdata->mmu;
+    while(1) {
+        sleep(1);
+        pthread_mutex_lock(&book_lock);
+        gc_run(mmu);
+        pthread_mutex_unlock(&book_lock);
+    }
+    pthread_exit(NULL);
+}
+
+void gc_init(mmu_t* mmu) {
+    // Insert a sentinel node at the bottom of the stack
+    gc_stack->top = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+    gc_stack->top->seg = 0;
+    gc_stack->top->next = NULL;
+    gc_stack->rbp = gc_stack->top;
+
+    // Spawn a thread and call gc_run(); ??
+    pthread_mutexattr_t attrmutex;
+
+    pthread_mutexattr_init(&attrmutex);
+    pthread_mutex_init(&book_lock, &attrmutex);
+
+    pthread_t gc_tid;
+    thread_data data;
+    data.mmu = mmu;
+    pthread_create(&gc_tid, NULL, gc_thread_handler, (void *)&data);
+
+    return;
+}
+
+void gc_push(segment* s) {
+    if(s->info & (1<<2)) {
+        gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
+        newnode->seg = s;
+        newnode->next = gc_stack->top;
+        gc_stack->top = newnode;
+        s->info = s->info | (1<<2);
+    }
+    return;
+}
+
 mmu_t* create_mem (mmu_t* mmu, size_t size) {
+    cout<<"Creating memory block of size : "<<size<<endl;
     mmu = (mmu_t*) malloc(sizeof(mmu_t));
     mmu->baseptr = malloc(size);
 
     // book-keeping space allocation
     // size_t book_size = size/2; // Revision 1: compute more carefully
     // size_t free_list_size = size/4; // Revision 1: compute more carefully
+    cout<<"Intializing book-keeping structrues..."<<endl;
     mmu->vmm = (books*) malloc(sizeof(books));
     mmu->vmm->seg_counter = 0;
+
+    mmu->vmm->free_list = (free_list_t*)malloc(sizeof(free_list_t));
+    mmu->vmm->segment_list = (segment_list_t*)malloc(sizeof(segment_list_t));
 
     /**
      * @a Review_Required : How to do this ? Brain not working.
@@ -250,6 +411,17 @@ mmu_t* create_mem (mmu_t* mmu, size_t size) {
      * @brief INIT : free_list with one big hole and other counter if required etc.
      * 
      */
+    hole* hole_1 = (hole*) malloc(sizeof(hole));
+    hole_1->baseptr = 0;
+    hole_1->size = size;
+    hole_1->next = hole_1->prev = NULL;
+    mmu->vmm->free_list->size = 1;
+    mmu->vmm->free_list->head = mmu->vmm->free_list->tail = hole_1;
+
+    cout<<"Memory Manager initialised."<<endl;
+    if(GC_ENABLE) {
+        gc_init(mmu);
+    }
 
     return mmu;
 } 
@@ -269,9 +441,11 @@ addrs create_var (mmu_t* mmu, var_type type) {
      *              done;
      * 
      */
+    pthread_mutex_lock(&book_lock);
+    cout<<"Creating variable..."<<endl;
     segment* s = mmu->vmm->segment_list->var_head;
     addrs var = 0;
-    while(s != mmu->vmm->segment_list->arr_head) {
+    while(s != NULL && s != mmu->vmm->segment_list->arr_head) {
         if (s->info>>3 == type) { 
             if (s->bitmap != slab_full_indicator) {
                 int i = 0;
@@ -279,11 +453,16 @@ addrs create_var (mmu_t* mmu, var_type type) {
                     i++;
                     if(i == 32) break;
                 }
-                s->bitmap = (s->bitmap | (1<<i));
-                var = ((s->seg_num<<5 )+ i);
+                if(i != 32) {
+                    s->bitmap = (s->bitmap | (1<<i));
+                    var = ((s->seg_num<<5 )+ i);
 
-                gc_push(s);
-                return var;
+                    if(GC_ENABLE) gc_push(s);
+                    cout<<"Found a segment..."<<endl;
+                    cout<<"New variable created at : "<<var<<endl;
+                    pthread_mutex_unlock(&book_lock);
+                    return var;
+                }
             }
         }
         s = s->next;
@@ -304,6 +483,7 @@ addrs create_var (mmu_t* mmu, var_type type) {
         cerr<<"Fatal Error :: assign_var() : Out of memory"<<endl;
         exit(EXIT_FAILURE);
     }
+    cout<<"Found a hole. Creating new segment..."<<endl;
     segment* newseg = (segment*) malloc(sizeof(segment));
     newseg->info = static_cast<u_int32_t>(0);
     newseg->info |= 1;
@@ -322,7 +502,9 @@ addrs create_var (mmu_t* mmu, var_type type) {
 
     newseg->bitmap |= 1;
     var = newseg->seg_num<<5;
-    gc_push(newseg);
+    if(GC_ENABLE) gc_push(newseg);
+    cout<<"New variable created at : "<<var<<endl;
+    pthread_mutex_unlock(&book_lock);
     return var;
 }
 
@@ -331,8 +513,9 @@ void assign_var (mmu_t* mmu, addrs var, var_type type, int value) {
      * @brief use var to find segment index and variable index, check for type mismatch, use memcpy and variable size
      * 
      */
-
-    segment *s = mmu->vmm->segment_list->var_head;
+    pthread_mutex_lock(&book_lock);
+    cout<<"Assigning variable at : "<<var<<endl;
+    segment *s = get_segment_head(mmu);
     addrs var_actual_addr_offset = 0; 
 
     while(s!=NULL){
@@ -361,6 +544,7 @@ void assign_var (mmu_t* mmu, addrs var, var_type type, int value) {
 
     void *var_mem_baseptr = (void * )(s->baseptr + var_actual_addr_offset * word_size);
     memcpy( var_mem_baseptr , (void *)&value, sizeof(int));
+    pthread_mutex_lock(&book_lock);
 }
 
 
@@ -369,7 +553,7 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
      * @brief similar to create_var, but we dont have to wait check first, we just create after finding a space.
      *
      */
-
+    pthread_mutex_lock(&book_lock);
     size_t required_arr_size = (size_t)(arr_size) * word_size;
     hole* h = mmu->vmm->free_list->head;
 
@@ -407,6 +591,7 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
 
     insert_after_segment(mmu, arr_seg);
 
+    if(GC_ENABLE) gc_push(arr_seg);
 
     h->baseptr += required_arr_size;
     h->size -= required_arr_size;
@@ -414,7 +599,7 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
     if(h->size == 0){
         delete_hole(mmu, h);
     }   
-
+    pthread_mutex_unlock(&book_lock);
     return var;
 }
 
@@ -424,7 +609,7 @@ void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
      * @brief similar to assign_arr
      * 
      */
-
+    pthread_mutex_lock(&book_lock);
     segment *s = mmu->vmm->segment_list->arr_head;
     
     while(s!=NULL){
@@ -450,6 +635,7 @@ void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
         void *memptr = (void *)(s->baseptr + i*word_size);
         memcpy(memptr, (void *)&value, sizeof(int));
     }
+    pthread_mutex_unlock(&book_lock);
 }
 
 
@@ -460,7 +646,8 @@ void free_elem (mmu_t* mmu, addrs var) {
      * @a Review_Required : should we just delete var segment if the bitmap is all 0
      * 
      */
-    segment* s = mmu->vmm->segment_list->var_head;
+    pthread_mutex_lock(&book_lock);
+    segment* s = get_segment_head(mmu);
     bool isVar = 0;
     while(s != NULL) {
         if((s->info & 1) && (s->seg_num<<5 <= var && var < (s->seg_num+1)<<5)) {
@@ -501,132 +688,6 @@ void free_elem (mmu_t* mmu, addrs var) {
             free_segment(mmu, s);
         }
     }
-    return;
-}
-
-void push_rbp() {
-    gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
-    newnode->seg = (segment*)(gc_stack->rbp);
-    newnode->next = gc_stack->top;
-
-    gc_stack->top = newnode;
-    gc_stack->rbp = gc_stack->rbp;
-}
-
-void gc_mark() {
-    // mark all segments currently in the stack as alive.S
-    gc_stack_node* h = gc_stack->top;
-    gc_stack_node* rbp = gc_stack->rbp;
-    while(h != NULL) {
-        if(h == rbp) {
-            rbp = (gc_stack_node*)((rbp)->seg);
-        } else {
-            h->seg->info = h->seg->info | (1<<1);
-        }
-        h = h->next;
-    }
-} 
-
-void gc_pop_frame() {
-    gc_stack_node* h = gc_stack->top;
-    gc_stack_node* rbp = gc_stack->rbp;
-
-    // delete all nodes part of the current frame, insert after the current base pointer
-    while(h != rbp) {
-        gc_stack->top = h->next;
-        h->seg->info = h->seg->info ^ (1<<2); // denote it absence from the stack
-        free(h);
-        h = gc_stack->top;
-    }
-
-    if(h == rbp) {
-        // repostion the base pointer to the prev frame base pointer and delete the rbp node.
-        gc_stack->rbp = (gc_stack_node*)(gc_stack->rbp->seg);
-        gc_stack->top = h->next;
-        free(h);
-        h = gc_stack->top;
-    }
-}
-
-void gc_sweep(mmu_t* mmu) {
-    segment* s = mmu->vmm->segment_list->var_head;
-    while(s != NULL) {
-        if(s->info & 1<<1) {
-            // live segment, do not touch
-            // reset the bit
-            s->info = s->info ^ (1<<1);
-        } else {
-            // delete segment; add to hole list; and all;
-            free_segment(mmu, s);
-        }
-    }
-    return;
-}
-
-void gc_compact(mmu_t* mmu) {
-    // compute new baseptr locations for all segments
-    // memcpy to these locations
-    // update free list 
-    size_t baseptr = 0;
-    segment* s = mmu->vmm->segment_list->var_head;
-    while(s != NULL) {
-        memcpy(mmu->baseptr + baseptr, mmu->baseptr+s->baseptr, s->size);
-        s->baseptr = baseptr;
-        baseptr = baseptr + s->size;
-    }
-
-    hole* h = mmu->vmm->free_list->head;
-    while(h->next != NULL) {
-        delete_hole(mmu, h);
-    }
-    if(h->next == NULL) {
-        h->size += h->baseptr - baseptr;
-        h->baseptr = baseptr;
-    }
-}
-
-void gc_run(mmu_t* mmu) {
-    gc_mark();
-    gc_sweep(mmu);
-}
-
-void* gc_thread_handler(void* data) {
-    data = (thread_data*) data;
-    mmu = data->mmu;
-    while(1) {
-        sleep(0.5);
-        gc_run(mmu);
-    }
-}
-
-void gc_init() {
-    // Insert a sentinel node at the bottom of the stack
-    gc_stack->top = (gc_stack_node*) malloc(sizeof(gc_stack_node));
-    gc_stack->top->seg = 0;
-    gc_stack->top->next = NULL;
-    gc_stack->rbp = gc_stack->top;
-
-    // Spawn a thread and call gc_run(); ??
-    pthread_mutexattr_t attrmutex;
-
-    pthread_mutexattr_init(&attrmutex);
-    pthread_mutex_init(&book_lock, &attrmutex);
-
-    pthread_t gc_tid;
-    thread_data data;
-    pthread_create(&gc_tid, NULL, gc_thread_handler, (void *)data);
-
-    pthread_join(gc_tid, NULL);
-    return;
-}
-
-void gc_push(segment* s) {
-    if(s->info & (1<<2)) {
-        gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
-        newnode->seg = s;
-        newnode->next = gc_stack->top;
-        gc_stack->top = newnode;
-        s->info = s->info | (1<<2);
-    }
+    pthread_mutex_unlock(&book_lock);
     return;
 }
