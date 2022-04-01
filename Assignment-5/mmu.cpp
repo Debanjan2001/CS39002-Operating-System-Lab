@@ -303,7 +303,7 @@ void push_rbp() {
 
 void gc_mark() {
     // mark all segments currently in the stack as alive.
-    cout<<"GC:Mark Phase running"<<endl;
+    cout<<"GC:Mark Phase running..."<<endl;
     gc_stack_node* h = gc_stack->top;
     gc_stack_node* rbp = gc_stack->rbp;
     while(h != NULL) {
@@ -351,6 +351,7 @@ void gc_sweep(mmu_t* mmu) {
             // live segment, do not touch
             // reset the bit
             s->info = s->info ^ (1<<1);
+            temp = s->next;
         } else {
             // delete segment; add to hole list; and all;
             cnt++;
@@ -402,6 +403,10 @@ void gc_pop_frame(mmu_t* mmu) {
         }
         h = gc_stack->top;
     }
+    else {
+        cerr<<"GC:Stack may be corrupted.";
+        exit(EXIT_FAILURE);
+    }
 
     gc_run(mmu);
     pthread_mutex_unlock(&book_lock);
@@ -429,7 +434,7 @@ void gc_init(mmu_t* mmu) {
         _bookkeeping += sizeof(gc_stack_node) + sizeof(gc_stack_t);
         logfile<<_bookkeeping<<" "<<_alloted<<endl;
     }
-    gc_stack->top->seg = 0;
+    gc_stack->top->seg = (segment*)gc_stack->top;
     gc_stack->top->next = NULL;
     gc_stack->rbp = gc_stack->top;
 
