@@ -9,7 +9,8 @@ void f1(addrs x, addrs y){
     // Not sure about x,y
     if(GC_ENABLE) push_rbp();
     addrs myarr = create_arr(my_memory, MED_INT, 50000);
-    assign_arr(my_memory, myarr, MED_INT, 20);
+    int value = 20;
+    assign_arr(my_memory, myarr, MED_INT, value);
     
     if(GC_ENABLE) gc_pop_frame(my_memory);
     else free_elem(my_memory, myarr);
@@ -33,6 +34,6 @@ int main(){
         f1(var1,var2);
     }
     if(GC_ENABLE) gc_pop_frame(my_memory);
-    if(GC_ENABLE) gc_run(my_memory);
+    // if(GC_ENABLE) gc_run(my_memory);
     return 0;
 }

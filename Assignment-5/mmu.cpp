@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <fstream>
+#include <time.h>
 using namespace std;
 
 typedef size_t addrs;
@@ -133,45 +134,64 @@ segment* get_segment_head(mmu_t* mmu) {
 }
 
 void insert_after_segment(mmu_t* mmu, segment* n) {
+    // cout<<"hello"<<endl;
+    if(n == NULL) {
+        cerr<<"Fatal Error : null segment insert." <<endl;
+        exit(EXIT_FAILURE);
+    }
     if(n->info & 1) {
         // variable segment insert at var_tail
-        if(mmu->vmm->segment_list->var_head == NULL) {
+        if(mmu->vmm->segment_list->var_head == NULL && mmu->vmm->segment_list->var_tail == NULL) {
+            // cout<<"hello"<<endl;
+            n->next = NULL;
+            n->prev = NULL;
             mmu->vmm->segment_list->var_head = n;
             mmu->vmm->segment_list->var_tail = n;
-            mmu->vmm->segment_list->var_tail->next = NULL;
-            mmu->vmm->segment_list->var_tail->prev = NULL;
+            // cout<<"hello"<<endl;
             if(mmu->vmm->segment_list->arr_head != NULL) {
+                // cout<<"hello"<<endl;
                 mmu->vmm->segment_list->arr_head->prev = mmu->vmm->segment_list->var_tail;
-                mmu->vmm->segment_list->var_tail =  mmu->vmm->segment_list->arr_head;
+                mmu->vmm->segment_list->var_tail->next =  mmu->vmm->segment_list->arr_head;
+                // cout<<"hello"<<endl;
             }
         } else {
+            // cout<<"hello"<<endl;
             n->next = mmu->vmm->segment_list->var_tail->next;
             n->prev = mmu->vmm->segment_list->var_tail;
             mmu->vmm->segment_list->var_tail = n;
-
+            // cout<<"hello"<<endl;
             if(mmu->vmm->segment_list->var_tail->next != NULL) {
+                // cout<<"hello"<<endl;
                 mmu->vmm->segment_list->var_tail->next->prev = mmu->vmm->segment_list->var_tail;
+                // cout<<"hello"<<endl;
             }
         }
     } else {
         // array segment insert at arr_tail
         if(mmu->vmm->segment_list->arr_head == NULL) {
+            // cout<<"hello"<<endl;
             mmu->vmm->segment_list->arr_head = n;
             mmu->vmm->segment_list->arr_tail = n;
             mmu->vmm->segment_list->arr_tail->next = NULL;
             mmu->vmm->segment_list->arr_tail->prev = NULL;
+            // cout<<"hello"<<endl;
 
             if( mmu->vmm->segment_list->var_tail != NULL) {
+                // cout<<"hello"<<endl;
                 mmu->vmm->segment_list->arr_head->prev =  mmu->vmm->segment_list->var_tail;
                 mmu->vmm->segment_list->var_tail->next =  mmu->vmm->segment_list->arr_head;
+                // cout<<"hello"<<endl;
             }
         } else {
+            // cout<<"hello"<<endl;
             n->next = NULL;
             mmu->vmm->segment_list->arr_tail->next = n;
             n->prev = mmu->vmm->segment_list->arr_tail;
             mmu->vmm->segment_list->arr_tail = n;
+            // cout<<"hello"<<endl;
         }
     }
+    // cout<<"hello"<<endl;
 }
 
 void delete_hole (mmu_t* mmu, hole* h) {
@@ -219,7 +239,7 @@ void free_segment (mmu_t* mmu, segment* seg) {
     h->prev = NULL;
     free(seg);
     if(ANALYSE) {
-        cout<<"bingo"<<endl;
+        // cout<<"bingo"<<endl;
         _alloted -= (h->size)*4;
         _bookkeeping = _bookkeeping - (sizeof(segment)) + sizeof(hole);
         logfile<<_bookkeeping<<" "<<_alloted<<endl;
@@ -310,8 +330,8 @@ void gc_mark() {
         if(h == rbp) {
             rbp = (gc_stack_node*)((rbp)->seg);
         } else {
-            h->seg->info = h->seg->info | (1<<1);
-            cout<<"GC_mArk::"<<h->seg->baseptr<<" "<<h->seg->size;
+            h->seg->info = (h->seg->info | (1<<1));
+            cout<<"GC_Mark::"<<h->seg->baseptr<<" "<<h->seg->size<<endl;
         }
         h = h->next;
     }
@@ -325,7 +345,7 @@ void gc_compact(mmu_t* mmu) {
     size_t baseptr = 0;
     segment* s = mmu->vmm->segment_list->var_head;
     while(s != NULL) {
-        memcpy(mmu->baseptr + baseptr, mmu->baseptr+s->baseptr, s->size);
+        memcpy((void *)((size_t)(mmu->baseptr) + baseptr), (void *)((size_t)(mmu->baseptr) + s->baseptr), s->size * word_size);
         s->baseptr = baseptr;
         baseptr = baseptr + s->size;
     }
@@ -368,9 +388,9 @@ void gc_sweep(mmu_t* mmu) {
 void gc_run(mmu_t* mmu, bool compact = false) {
     gc_mark();
     gc_sweep(mmu);
-    if(mmu->vmm->free_list->size > max_holes || compact) {
-        gc_compact(mmu);
-    }
+    // if(mmu->vmm->free_list->size > max_holes || compact) {
+    //     gc_compact(mmu);
+    // }
 }
 
 void gc_pop_frame(mmu_t* mmu) {
@@ -408,15 +428,19 @@ void gc_pop_frame(mmu_t* mmu) {
         exit(EXIT_FAILURE);
     }
 
-    gc_run(mmu);
+    // gc_run(mmu);
     pthread_mutex_unlock(&book_lock);
 }
 
 void* gc_thread_handler(void* data) {
     thread_data* tdata = (thread_data*) data;
     mmu_t* mmu = tdata->mmu;
+    struct timespec tval {
+        0, 250000
+    };
+    struct timespec rval;
     while(1) {
-        sleep(1);
+        nanosleep(&tval, &rval);
         pthread_mutex_lock(&book_lock);
         cout<<"Running GC..."<<endl;
         gc_run(mmu);
@@ -428,7 +452,7 @@ void* gc_thread_handler(void* data) {
 void gc_init(mmu_t* mmu) {
     // Insert a sentinel node at the bottom of the stack
     cout<<"GC:init all data structures. Spawning a gc thread..."<<endl;
-    gc_stack = (gc_stack_t*) malloc(sizeof(gc_stack));
+    gc_stack = (gc_stack_t*) malloc(sizeof(gc_stack_t));
     gc_stack->top = (gc_stack_node*) malloc(sizeof(gc_stack_node));
     if(ANALYSE) {
         _bookkeeping += sizeof(gc_stack_node) + sizeof(gc_stack_t);
@@ -445,15 +469,15 @@ void gc_init(mmu_t* mmu) {
     pthread_mutex_init(&book_lock, &attrmutex);
 
     pthread_t gc_tid;
-    thread_data data;
-    data.mmu = mmu;
-    pthread_create(&gc_tid, NULL, gc_thread_handler, (void *)&data);
+    thread_data* data = (thread_data*) malloc(sizeof(thread_data));
+    data->mmu = mmu;
+    pthread_create(&gc_tid, NULL, gc_thread_handler, (void *)data);
 
     return;
 }
 
 void gc_push(segment* s) {
-    if(s->info & (1<<2)) {
+    if(!(s->info & (1<<2))) {
         gc_stack_node* newnode = (gc_stack_node*) malloc(sizeof(gc_stack_node));
         if(ANALYSE) {
             _bookkeeping += sizeof(gc_stack_node);
@@ -645,7 +669,7 @@ void assign_var (mmu_t* mmu, addrs var, var_type type, int value) {
         exit(EXIT_FAILURE);
     }
     cout<<"Assigning value now..."<<endl;
-    void *var_mem_baseptr = (void * )(mmu->baseptr + (s->baseptr + var_actual_addr_offset) * word_size);
+    void *var_mem_baseptr = (void *)((size_t)(mmu->baseptr) + (s->baseptr + var_actual_addr_offset) * word_size);
     memcpy( var_mem_baseptr , (void *)&value, var_size(type));
     cout<<"Assignment successful for variable at : "<<var<<endl;
     pthread_mutex_unlock(&book_lock);
@@ -745,7 +769,7 @@ int getval(mmu_t* mmu, addrs var) {
     }
     u_int type = s->info>>3;
     int value = 0;
-    void *var_mem_baseptr = (void * )(mmu->baseptr + (s->baseptr + var_actual_addr_offset) * word_size);
+    void *var_mem_baseptr = (void * )((size_t)(mmu->baseptr) + (s->baseptr + var_actual_addr_offset) * word_size);
     memcpy((void *)&value, var_mem_baseptr, var_size(type));
     pthread_mutex_unlock(&book_lock);
     return value;
@@ -774,7 +798,7 @@ int getval(mmu_t* mmu, addrs arr, unsigned int index) {
         exit(EXIT_FAILURE);
     }
     int value = 0;
-    void *memptr = (void *)(mmu->baseptr + (s->baseptr + index)*word_size);
+    void *memptr = (void *)((size_t)(mmu->baseptr) + (s->baseptr + index)*word_size);
     memcpy((void *)&value, memptr, sizeof(int));
     pthread_mutex_unlock(&book_lock);
     return value;
@@ -810,7 +834,7 @@ void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
     cout<<"Assigning array at all fields."<<endl;
     int arr_size = (int)(s->size);
     for(int i=0;i<arr_size;i++){
-        void *memptr = (void *)(mmu->baseptr + (s->baseptr + i)*word_size);
+        void *memptr = (void *)((size_t)(mmu->baseptr) + (s->baseptr + i)*word_size);
         memcpy(memptr, (void *)&value, var_size(arr_type));
     }
 
@@ -852,7 +876,7 @@ void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value, int index) {
         exit(EXIT_FAILURE);
     }
     
-    void *memptr = (void *)(mmu->baseptr + (s->baseptr + index)*word_size);
+    void *memptr = (void *)((size_t)(mmu->baseptr) + (s->baseptr + index)*word_size);
     memcpy(memptr, (void *)&value, var_size(arr_type));
 
     cout<<"Value assigned to array at : "<<arr<<endl;
@@ -892,7 +916,7 @@ void free_elem (mmu_t* mmu, addrs var) {
             // delete segment and add to hole if !GC_ENABLE otherwise just MARK ;
             if(GC_ENABLE) {
                 // mark the segment
-                s->info = s->info ^ (1<<1);
+                s->info = s->info | (1<<1);
                 cout<<"Marked for GC."<<endl;
             } else {
                 // function will handle deleting the segment node and adding to the free_list
@@ -906,7 +930,7 @@ void free_elem (mmu_t* mmu, addrs var) {
         // delete segment and add to hole if !GC_ENABLE otherwise just MARK ;
         if(GC_ENABLE) {
             // mark the segment
-            s->info = s->info ^ (1<<1);
+            s->info = s->info | (1<<1);
             cout<<"Marked for GC."<<endl;
         } else {
             // function will handle deleting the segment node and adding to the free_list
