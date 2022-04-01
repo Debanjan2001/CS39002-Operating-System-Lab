@@ -12,4 +12,10 @@ int main() {
     int value = 100;
     assign_var(mmu, t1, INT, value);
 
+    int val = getval(mmu, t1);
+    cout<<"Value is : "<<val<<endl;
+
+    addrs t2 = create_var(mmu, BOOL);
+
+    return 0;
 }

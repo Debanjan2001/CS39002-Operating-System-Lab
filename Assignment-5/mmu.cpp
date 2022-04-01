@@ -24,7 +24,7 @@ enum var_type {
     BOOL
 };
 
-size_t var_size(var_type v) {
+size_t var_size(u_int v) {
     if(v == INT) return 4;
     else if(v == MED_INT) return 3;
     else if(v == CHAR) return 1;
@@ -260,7 +260,8 @@ void push_rbp() {
 }
 
 void gc_mark() {
-    // mark all segments currently in the stack as alive.S
+    // mark all segments currently in the stack as alive.
+    cout<<"GC:Mark Phase running"<<endl;
     gc_stack_node* h = gc_stack->top;
     gc_stack_node* rbp = gc_stack->rbp;
     while(h != NULL) {
@@ -300,6 +301,7 @@ void gc_compact(mmu_t* mmu) {
     // compute new baseptr locations for all segments
     // memcpy to these locations
     // update free list 
+    cout<<"GC:Compacting..."<<endl;
     size_t baseptr = 0;
     segment* s = mmu->vmm->segment_list->var_head;
     while(s != NULL) {
@@ -320,6 +322,7 @@ void gc_compact(mmu_t* mmu) {
 
 
 void gc_sweep(mmu_t* mmu) {
+    cout<<"GC:Sweep Phase running"<<endl;
     segment* s = mmu->vmm->segment_list->var_head;
     while(s != NULL) {
         if(s->info & 1<<1) {
@@ -336,6 +339,7 @@ void gc_sweep(mmu_t* mmu) {
     }
     return;
 }
+
 void gc_run(mmu_t* mmu) {
     gc_mark();
     gc_sweep(mmu);
@@ -355,6 +359,7 @@ void* gc_thread_handler(void* data) {
 
 void gc_init(mmu_t* mmu) {
     // Insert a sentinel node at the bottom of the stack
+    cout<<"GC:init all data structures. spawning a gc thread..."<<endl;
     gc_stack->top = (gc_stack_node*) malloc(sizeof(gc_stack_node));
     gc_stack->top->seg = 0;
     gc_stack->top->next = NULL;
@@ -413,7 +418,7 @@ mmu_t* create_mem (mmu_t* mmu, size_t size) {
      */
     hole* hole_1 = (hole*) malloc(sizeof(hole));
     hole_1->baseptr = 0;
-    hole_1->size = size;
+    hole_1->size = size>>2;
     hole_1->next = hole_1->prev = NULL;
     mmu->vmm->free_list->size = 1;
     mmu->vmm->free_list->head = mmu->vmm->free_list->tail = hole_1;
@@ -472,7 +477,7 @@ addrs create_var (mmu_t* mmu, var_type type) {
      */
     hole* h = mmu->vmm->free_list->head;
     while(h != NULL) {
-        if(h->size >= 32*word_size){
+        if(h->size >= 32){
             break;
         } else {
             h = h->next;
@@ -488,6 +493,9 @@ addrs create_var (mmu_t* mmu, var_type type) {
     newseg->info = static_cast<u_int32_t>(0);
     newseg->info |= 1;
     newseg->info |= type<<3;
+    if(type != INT) {
+        cout<<"Word_Align:Allocating redundant space"<<endl;
+    }
     newseg->size = 32 ;
     newseg->seg_num = mmu->vmm->seg_counter ++;
     newseg->baseptr = h->baseptr;
@@ -496,6 +504,7 @@ addrs create_var (mmu_t* mmu, var_type type) {
 
     h->baseptr += 32;
     h->size -= 32;
+    
     if(h->size == 0) {
         delete_hole(mmu, h);
     }
@@ -535,16 +544,17 @@ void assign_var (mmu_t* mmu, addrs var, var_type type, int value) {
         cerr<<"Fatal Error:: assign_var() : Invalid Memory Assignment"<<endl;
         exit(EXIT_FAILURE);
     }
-
+    cout<<"Found the address..."<<endl;
     u_int8_t cur_var_type = (s->info >> 3);
     if( cur_var_type != type ){
         cerr << "Fatal Error:: assign_arr() : Data type mismatch during array assignment" << endl;
         exit(EXIT_FAILURE);
     }
-
-    void *var_mem_baseptr = (void * )(s->baseptr + var_actual_addr_offset * word_size);
-    memcpy( var_mem_baseptr , (void *)&value, sizeof(int));
-    pthread_mutex_lock(&book_lock);
+    cout<<"Assigning value now..."<<endl;
+    void *var_mem_baseptr = (void * )(mmu->baseptr + (s->baseptr + var_actual_addr_offset) * word_size);
+    memcpy( var_mem_baseptr , (void *)&value, var_size(type));
+    cout<<"Assignment successful for variable at : "<<var<<endl;
+    pthread_mutex_unlock(&book_lock);
 }
 
 
@@ -554,9 +564,11 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
      *
      */
     pthread_mutex_lock(&book_lock);
-    size_t required_arr_size = (size_t)(arr_size) * word_size;
+    cout<<"Creating array..."<<endl;
+    size_t required_arr_size = (size_t)(arr_size);
     hole* h = mmu->vmm->free_list->head;
 
+    cout<<"Searching for a hole..."<<endl;
     while(h!=NULL){
         if(h->size >= required_arr_size){
             break;
@@ -574,11 +586,14 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
         exit(EXIT_FAILURE);
     }
 
-
+    cout<<"Found a hole. Allocating..."<<endl;
     segment *arr_seg = (segment *)malloc(sizeof(segment));
     arr_seg->baseptr = h->baseptr;
     arr_seg->info = static_cast<u_int32_t>(0);
     arr_seg->info |= (type<<3);
+    if(type != INT) {
+        cout<<"Word_Align:Allocating redundant space"<<endl;
+    }
     arr_seg->bitmap = 0;
     arr_seg->size = required_arr_size;
     arr_seg->seg_num = mmu->vmm->seg_counter++;
@@ -595,20 +610,48 @@ addrs create_arr (mmu_t* mmu, var_type type, int arr_size) {
 
     h->baseptr += required_arr_size;
     h->size -= required_arr_size;
+    cout<<"Reducing hole size..."<<endl;
 
     if(h->size == 0){
+        cout<<"Hole exhausted. Removing..."<<endl;
         delete_hole(mmu, h);
-    }   
+    }
+    cout<<"Array created at : "<<var<<endl;
     pthread_mutex_unlock(&book_lock);
     return var;
 }
 
+int getval(mmu_t* mmu, addrs var) {
+    pthread_mutex_lock(&book_lock);
+    segment *s = get_segment_head(mmu);
+    addrs var_actual_addr_offset = 0; 
 
-void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
-    /**
-     * @brief similar to assign_arr
-     * 
-     */
+    while(s!=NULL){
+        addrs lookup_range_min = (s->seg_num << 5);
+        addrs lookup_range_max = lookup_range_min + 31;
+        if(var >= lookup_range_min && var <= lookup_range_max){
+            // Found the segment where it was declared;
+            // Set the offset, var = i + seg_num * 32, where 'i' in [0,31]
+            var_actual_addr_offset = var - lookup_range_min;
+            break;
+        }
+        s = s->next;
+    }
+
+
+    if(s==NULL){
+        cerr<<"Fatal Error:: assign_var() : Invalid Memory Assignment"<<endl;
+        exit(EXIT_FAILURE);
+    }
+    u_int type = s->info>>3;
+    int value = 0;
+    void *var_mem_baseptr = (void * )(mmu->baseptr + (s->baseptr + var_actual_addr_offset) * word_size);
+    memcpy((void *)&value, var_mem_baseptr, var_size(type));
+    pthread_mutex_unlock(&book_lock);
+    return value;
+}
+
+int getval(mmu_t* mmu, addrs arr, unsigned int index) {
     pthread_mutex_lock(&book_lock);
     segment *s = mmu->vmm->segment_list->arr_head;
     
@@ -623,18 +666,55 @@ void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
         cerr << "Fatal Error:: assign_arr() : Invalid Array Assignment" << endl;
         exit(EXIT_FAILURE);
     }
+    u_int8_t arr_type = ((s->info) >> 3); 
 
+    int arr_size = (int)(s->size);
+    if(index >= arr_size) {
+        cerr << "Fatal Error:: getval() : Out of Bounds Access"<<endl;
+        exit(EXIT_FAILURE);
+    }
+    int value = 0;
+    void *memptr = (void *)(mmu->baseptr + (s->baseptr + index)*word_size);
+    memcpy((void *)&value, memptr, sizeof(int));
+    pthread_mutex_unlock(&book_lock);
+    return value;
+}
+
+void assign_arr (mmu_t* mmu, addrs arr, var_type type, int value) {
+    /**
+     * @brief similar to assign_arr
+     * 
+     */
+    pthread_mutex_lock(&book_lock);
+    cout<<"Assigning array..."<<endl;
+    segment *s = mmu->vmm->segment_list->arr_head;
+    
+    while(s!=NULL){
+        if(s->seg_num == arr){
+            break;
+        }
+        s=s->next;
+    }
+
+    if(s==NULL){
+        cerr << "Fatal Error:: assign_arr() : Invalid Array Assignment" << endl;
+        exit(EXIT_FAILURE);
+    }
+    cout<<"Array located..."<<endl;
     u_int8_t arr_type = ((s->info) >> 3); 
     if(type != arr_type){
         cerr << "Fatal Error:: assign_arr() : Data type mismatch during array assignment" << endl;
         exit(EXIT_FAILURE);
     }
 
-    int arr_size = (int)(s->size / word_size);
+    cout<<"Assigning array at all fields."<<endl;
+    int arr_size = (int)(s->size);
     for(int i=0;i<arr_size;i++){
-        void *memptr = (void *)(s->baseptr + i*word_size);
+        void *memptr = (void *)(mmu->baseptr + (s->baseptr + i)*word_size);
         memcpy(memptr, (void *)&value, sizeof(int));
     }
+
+    cout<<"Value assigned to array at : "<<arr<<endl;
     pthread_mutex_unlock(&book_lock);
 }
 
@@ -647,6 +727,7 @@ void free_elem (mmu_t* mmu, addrs var) {
      * 
      */
     pthread_mutex_lock(&book_lock);
+    cout<<"Freeing segment allocated at : "<<var<<endl;
     segment* s = get_segment_head(mmu);
     bool isVar = 0;
     while(s != NULL) {
@@ -671,9 +752,11 @@ void free_elem (mmu_t* mmu, addrs var) {
             if(GC_ENABLE) {
                 // mark the segment
                 s->info = s->info | (1<<1);
+                cout<<"Marked for GC."<<endl;
             } else {
                 // function will handle deleting the segment node and adding to the free_list
                 free_segment(mmu, s);
+                cout<<"Segment freed."<<endl;
             }
         } else {
             // done;
@@ -683,11 +766,14 @@ void free_elem (mmu_t* mmu, addrs var) {
         if(GC_ENABLE) {
             // mark the segment
             s->info = s->info | (1<<1);
+            cout<<"Marked for GC."<<endl;
         } else {
             // function will handle deleting the segment node and adding to the free_list
             free_segment(mmu, s);
+            cout<<"Segment freed."<<endl;
         }
     }
+    
     pthread_mutex_unlock(&book_lock);
     return;
 }
