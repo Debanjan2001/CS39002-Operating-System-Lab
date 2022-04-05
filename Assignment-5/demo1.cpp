@@ -1,7 +1,8 @@
 #include<iostream>
+#include "mmu.cpp"
+
 using namespace std;
 
-#include "mmu.cpp"
 
 mmu_t *my_memory;
 const size_t megabytes = (1<<20);
@@ -19,7 +20,7 @@ void f1(addrs x, addrs y){
 
 int main(){
     ANALYSE = true;
-    GC_ENABLE = false;
+    GC_ENABLE = true;
     size_t required = ( megabytes * 500 ); 
     my_memory = create_mem(my_memory, required);
 

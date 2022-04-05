@@ -1,7 +1,7 @@
 #include "mmu.cpp"
 
 int main() {
-    GC_ENABLE = false;
+    GC_ENABLE = true;
 
     mmu_t* mmu;
     size_t size = 250<<20;
@@ -16,6 +16,17 @@ int main() {
     cout<<"Value is : "<<val<<endl;
 
     addrs t2 = create_var(mmu, BOOL);
+
+    assign_var(mmu, t2, BOOL, true);
+
+    addrs t3 = create_var(mmu, CHAR);
+
+    assign_var(mmu, t3, CHAR, true);
+
+    addrs t4 = create_var(mmu, MED_INT);
+
+    assign_var(mmu, t4, MED_INT, true);
+
 
     return 0;
 }
